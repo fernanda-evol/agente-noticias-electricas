@@ -7,6 +7,7 @@ import os
 import re
 import urllib3
 import urllib.parse
+import time
 from datetime import datetime, timezone
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -24,15 +25,24 @@ HEADERS = {
 # los runners de GitHub Actions son rangos de datacenter conocidos que varios
 # WAFs (Wordfence, Sucuri, Cloudflare) bloquean por defecto. El proxy hace la
 # petición desde su propia IP y nos devuelve el HTML/XML crudo tal cual.
+# Son servicios gratuitos sin garantía de disponibilidad, por eso hay dos en
+# cascada y cada uno se reintenta antes de pasar al siguiente. (corsproxy.io
+# quedó afuera: desde hace poco exige API key paga para cualquier uso que no
+# sea localhost, así que nunca va a funcionar desde un runner de Actions.)
 PROXIES_LECTURA = [
     "https://api.allorigins.win/raw?url={url}",
-    "https://corsproxy.io/?url={url}",
+    "https://api.codetabs.com/v1/proxy?quest={url}",
 ]
+
+REINTENTOS_POR_PROXY = 2
+ESPERA_ENTRE_REINTENTOS = 3
 
 
 def get_con_resiliencia(session, url, timeout=20, minimo_bytes=200):
     """GET con reintento automático vía proxy si la petición directa falla.
-    Devuelve el objeto Response (directo o vía proxy) o None si todo falló."""
+    Cada proxy se reintenta un par de veces (los fallos gratuitos suelen ser
+    transitorios: saturación momentánea, timeout puntual). Devuelve el
+    objeto Response (directo o vía proxy) o None si todo falló."""
     try:
         resp = session.get(url, timeout=timeout, verify=False)
         if resp.status_code == 200 and len(resp.content) >= minimo_bytes:
@@ -44,14 +54,17 @@ def get_con_resiliencia(session, url, timeout=20, minimo_bytes=200):
     for plantilla in PROXIES_LECTURA:
         proxy_url = plantilla.format(url=urllib.parse.quote(url, safe=""))
         nombre_proxy = urllib.parse.urlparse(proxy_url).netloc
-        try:
-            resp = session.get(proxy_url, timeout=timeout, verify=False)
-            if resp.status_code == 200 and len(resp.content) >= minimo_bytes:
-                print(f"Proxy {nombre_proxy} -> OK ({len(resp.content)} bytes)")
-                return resp
-            print(f"Proxy {nombre_proxy} -> HTTP {resp.status_code} ({len(resp.content)} bytes)")
-        except Exception as e:
-            print(f"Proxy {nombre_proxy} falló: {e}")
+        for intento in range(1, REINTENTOS_POR_PROXY + 1):
+            try:
+                resp = session.get(proxy_url, timeout=timeout, verify=False)
+                if resp.status_code == 200 and len(resp.content) >= minimo_bytes:
+                    print(f"Proxy {nombre_proxy} -> OK ({len(resp.content)} bytes, intento {intento})")
+                    return resp
+                print(f"Proxy {nombre_proxy} -> HTTP {resp.status_code} ({len(resp.content)} bytes, intento {intento}/{REINTENTOS_POR_PROXY})")
+            except Exception as e:
+                print(f"Proxy {nombre_proxy} falló (intento {intento}/{REINTENTOS_POR_PROXY}): {e}")
+            if intento < REINTENTOS_POR_PROXY:
+                time.sleep(ESPERA_ENTRE_REINTENTOS)
 
     return None
 
