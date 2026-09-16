@@ -85,9 +85,54 @@ def clasificar_localmente(titulo, texto):
         "sentimiento": "Neutro"
     }
 
+def obtener_texto_articulo(session, url, max_chars=4000):
+    """Descarga el cuerpo del artículo para enriquecer el texto de clasificación.
+    El RSS de ElectroMinería solo trae una oración de descripción, no el
+    cuerpo completo, así que esto complementa yendo a buscar la nota."""
+    try:
+        resp = session.get(url, timeout=15, verify=False)
+        if resp.status_code != 200:
+            return ""
+        soup = BeautifulSoup(resp.text, "html.parser")
+        contenedor = soup.select_one("div.entry-content") or soup.select_one("article")
+        if not contenedor:
+            return ""
+        for tag in contenedor.select("script, style"):
+            tag.decompose()
+        texto = re.sub(r'\s+', ' ', contenedor.get_text(separator=" ")).strip()
+        return texto[:max_chars]
+    except Exception:
+        return ""
+
+
+def obtener_electromineria_via_html(session, limite=20):
+    """Último recurso si el RSS también falla: scraping directo del home."""
+    try:
+        resp = session.get("https://electromineria.cl/", timeout=20, verify=False)
+        print(f"ElectroMinería HTML (fallback) -> HTTP {resp.status_code}")
+        if resp.status_code != 200:
+            return []
+        soup = BeautifulSoup(resp.text, "html.parser")
+        vistos, noticias = set(), []
+        for h2 in soup.select("h2 a[href]"):
+            url = h2.get("href", "").strip()
+            titulo = h2.get_text(strip=True)
+            if not (url.startswith("https://electromineria.cl/") and titulo) or url in vistos:
+                continue
+            vistos.add(url)
+            texto = obtener_texto_articulo(session, url)
+            noticias.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": texto, "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')})
+            if len(noticias) >= limite:
+                break
+        return noticias
+    except Exception as e:
+        print(f"Error scraping HTML ElectroMinería: {e}")
+        return []
+
+
 def obtener_noticias():
     noticias = []
-    
+
     # 1. Revista EI (API WP)
     try:
         resp = requests.get("https://www.revistaei.cl/wp-json/wp/v2/posts?per_page=30", headers=HEADERS, timeout=15, verify=False)
@@ -96,38 +141,59 @@ def obtener_noticias():
                 titulo = limpiar_html(post.get("title", {}).get("rendered", ""))
                 url = post.get("link", "").strip()
                 texto = limpiar_html(post.get("content", {}).get("rendered", ""))
+                fecha = post.get("date") or datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
                 if titulo and url:
-                    noticias.append({"fuente": "Revista EI", "titulo": titulo, "url": url, "texto": texto, "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')})
+                    noticias.append({"fuente": "Revista EI", "titulo": titulo, "url": url, "texto": texto, "fecha": fecha})
+        else:
+            print(f"Revista EI -> HTTP {resp.status_code}")
     except Exception as e:
         print(f"Error Revista EI: {e}")
 
-    # 2. ElectroMinería (Extracción dual: API de categoría específica + RSS)
+    # 2. ElectroMinería — el REST API de este sitio (/wp-json/wp/v2/posts) está
+    # filtrado por un plugin de seguridad y siempre devuelve [] con HTTP 200,
+    # así que no se usa como fuente. El RSS es la vía confiable; se complementa
+    # yendo a buscar el cuerpo de cada artículo porque el feed solo trae una
+    # oración de descripción.
+    session_em = requests.Session()
+    session_em.headers.update({
+        **HEADERS,
+        "Referer": "https://electromineria.cl/",
+        "Accept": "application/rss+xml, application/xml;q=0.9, text/html;q=0.8, */*;q=0.7",
+    })
     try:
-        resp_em = requests.get("https://electromineria.cl/wp-json/wp/v2/posts?categories=3&per_page=30", headers=HEADERS, timeout=15, verify=False)
-        if resp_em.status_code == 200:
-            posts = resp_em.json()
-            if isinstance(posts, list):
-                for post in posts:
-                    titulo = limpiar_html(post.get("title", {}).get("rendered", ""))
-                    url = post.get("link", "").strip()
-                    texto = limpiar_html(post.get("content", {}).get("rendered", ""))
-                    if titulo and url:
-                        noticias.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": texto, "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')})
+        # "Calentar" la sesión visitando el home primero: algunos WAFs exigen
+        # una cookie de sesión antes de servir el feed a clientes no-navegador.
+        session_em.get("https://electromineria.cl/", timeout=15, verify=False)
     except Exception as e:
-        print(f"Error API ElectroMinería: {e}")
+        print(f"Aviso: no se pudo precalentar sesión ElectroMinería: {e}")
 
+    entradas_rss = 0
     try:
-        resp_rss = requests.get("https://electromineria.cl/feed/", headers=HEADERS, timeout=15, verify=False)
+        resp_rss = session_em.get("https://electromineria.cl/feed/", timeout=20, verify=False)
+        print(f"ElectroMinería RSS -> HTTP {resp_rss.status_code}, {len(resp_rss.content)} bytes")
         if resp_rss.status_code == 200:
             feed = feedparser.parse(resp_rss.content)
+            entradas_rss = len(feed.entries)
+            print(f"ElectroMinería RSS -> {entradas_rss} entradas parseadas")
             for entry in feed.entries:
                 titulo = getattr(entry, 'title', '').strip()
                 url = getattr(entry, 'link', '').strip()
-                if titulo and url:
+                if not (titulo and url):
+                    continue
+                texto = obtener_texto_articulo(session_em, url)
+                if not texto:
                     content_raw = entry.content[0].value if "content" in entry and len(entry.content) > 0 else getattr(entry, 'summary', '')
-                    noticias.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": limpiar_html(content_raw), "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')})
+                    texto = limpiar_html(content_raw)
+                fecha_pub = entry.get("published", datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'))
+                noticias.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": texto, "fecha": fecha_pub})
+        else:
+            print(f"ElectroMinería RSS bloqueado o con error: HTTP {resp_rss.status_code}")
     except Exception as e:
         print(f"Error RSS ElectroMinería: {e}")
+
+    # Fallback final si el RSS no entregó nada (bloqueo puntual, timeout, etc.)
+    if entradas_rss == 0:
+        noticias.extend(obtener_electromineria_via_html(session_em))
 
     return noticias
 
