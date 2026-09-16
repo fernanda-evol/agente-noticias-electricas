@@ -30,7 +30,7 @@ DB_NAME = "noticias_energia.db"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 }
 
 PALABRAS_EXCLUIR_EMPLEO = [
@@ -100,20 +100,20 @@ def extraer_panorama_energetico_electromineria():
                             "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
                             "texto": titulo
                         })
-            print(f"   [Web Scraper] {len(noticias)} artículos encontrados en Panorama Energético.")
+            print(f"   [Web Scraper] {len(noticias)} artículos encontrados.")
     except Exception as e:
-        print(f"⚠️ Error al extraer Panorama Energético: {e}")
+        print(f"⚠️ Error Scraper ElectroMinería: {e}")
     return noticias
 
 def obtener_noticias():
     noticias_map = {}
     hace_30_dias = datetime.now(timezone.utc) - timedelta(days=30)
     
-    # 1. Extracción directa de la sección Panorama Energético de ElectroMinería
+    # 1. Scraper Panorama Energético
     for item in extraer_panorama_energetico_electromineria():
         noticias_map[item["url"]] = item
 
-    # 2. Extracción vía API REST y RSS
+    # 2. APIs REST y RSS
     for fuente in FUENTES_API:
         print(f"📡 Consultando API/RSS: {fuente['nombre']}...")
         try:
@@ -163,19 +163,18 @@ def analizar_con_llm(titulo, texto, fuente):
 
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        print("❌ GEMINI_API_KEY no configurada.")
         return None
 
     client = genai.Client(api_key=api_key)
     
     prompt = f"""
-    Eres un analista experto del mercado eléctrico chileno (CNE, Coordinador Eléctrico, BESS, Transmisión, PMGD, Precios Spot).
+    Eres un analista experto del mercado eléctrico chileno.
     Analiza la noticia de {fuente}:
     
     Título: {titulo}
     Texto: {texto[:2500]}
     
-    SI ES OFERTA DE EMPLEO, AVISO O PUBLICIDAD RESPONDE: {{"es_relevante": false}}
+    SI ES OFERTA DE EMPLEO, RESPONDE: {{"es_relevante": false}}
 
     CLASIFICACIÓN ESTRICTA DE "impacto_mercado":
     - "Alto": Leyes, reglamentos, resoluciones CNE/Coordinador, proyectos BESS o Transmisión >US$50M o >100MW, vertimientos masivos o alzas tarifarias.
@@ -215,15 +214,14 @@ def ejecutar_agente():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    # --- FASE 1: REPARAR REGISTROS ANTIGUOS SIN ANÁLISIS EN PROFUNDIDAD ---
-    cursor.execute("SELECT id, fuente, titulo, url, texto FROM noticias WHERE actores_mencionados = '[]' OR actores_mencionados = '\"[]\"'")
+    # FASE 1: RE-ANALIZAR REGISTROS GENÉRICOS ANTIGUOS
+    cursor.execute("SELECT id, fuente, titulo, url, resumen_ejecutivo FROM noticias WHERE actores_mencionados = '[]' OR actores_mencionados = '\"[]\"'")
     filas_a_reparar = cursor.fetchall()
     
     if filas_a_reparar:
-        print(f"🛠️ Re-analizando {len(filas_a_reparar)} registros genéricos en base de datos...")
-        for row_id, fuente, titulo, url, texto_db in filas_a_reparar:
-            contenido = texto_db if texto_db else titulo
-            analisis = analizar_con_llm(titulo, contenido, fuente)
+        print(f"🛠️ Re-analizando {len(filas_a_reparar)} registros genéricos...")
+        for row_id, fuente, titulo, url, resumen_db in filas_a_reparar:
+            analisis = analizar_con_llm(titulo, resumen_db, fuente)
             if analisis and analisis.get("es_relevante", True):
                 actores_list = analisis.get("actores_mencionados", [])
                 if not isinstance(actores_list, list):
@@ -242,11 +240,10 @@ def ejecutar_agente():
                     row_id
                 ))
                 conn.commit()
-                print(f"   🔄 Registro #{row_id} actualizado con IA.")
 
-    # --- FASE 2: PROCESAR PUBLICACIONES NUEVAS ---
+    # FASE 2: PROCESAR PUBLICACIONES NUEVAS
     noticias = obtener_noticias()
-    print(f"\n📰 Total de noticias recuperadas para procesar: {len(noticias)}")
+    print(f"\n📰 Total de noticias únicas recuperadas: {len(noticias)}")
 
     noticias_guardadas = 0
     for item in noticias:
@@ -281,7 +278,6 @@ def ejecutar_agente():
             ))
             conn.commit()
             noticias_guardadas += 1
-            print(f"✅ Noticia agregada.")
             
     conn.close()
     print(f"\n🚀 Proceso finalizado. {noticias_guardadas} noticias agregadas a {DB_NAME}.")
