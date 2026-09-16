@@ -1,5 +1,4 @@
 import requests
-import feedparser
 from bs4 import BeautifulSoup
 import sqlite3
 import json
@@ -8,16 +7,23 @@ import re
 from datetime import datetime, timedelta, timezone
 from google import genai
 
+# Fuentes configuradas con la API REST nativa de WordPress
 FUENTES = [
-    {"nombre": "Revista EI", "url_rss": "https://www.revistaei.cl/feed/"},
-    {"nombre": "ElectroMinería", "url_rss": "https://www.electromineria.cl/feed/"}
+    {
+        "nombre": "Revista EI", 
+        "url_api": "https://www.revistaei.cl/wp-json/wp/v2/posts?per_page=20"
+    },
+    {
+        "nombre": "ElectroMinería", 
+        "url_api": "https://www.electromineria.cl/wp-json/wp/v2/posts?per_page=20"
+    }
 ]
 
 DB_NAME = "noticias_energia.db"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept": "application/json"
 }
 
 def inicializar_bd():
@@ -50,95 +56,47 @@ def limpiar_html(html_content):
     texto = soup.get_text(separator=" ")
     return re.sub(r'\s+', ' ', texto).strip()
 
-def obtener_items_feed(url_rss):
-    """
-    Intenta obtener las noticias vía API rss2json. Si falla, hace petición directa con feedparser.
-    """
-    api_url = f"https://api.rss2json.com/v1/api.json?rss_url={requests.utils.quote(url_rss)}"
-    try:
-        resp = requests.get(api_url, headers=HEADERS, timeout=15)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("status") == "ok" and "items" in data and len(data["items"]) > 0:
-                print("   ✔ Recuperado vía API rss2json")
-                return [
-                    {
-                        "title": item.get("title", "").strip(),
-                        "link": item.get("link", "").strip(),
-                        "pubDate": item.get("pubDate", ""),
-                        "content": item.get("content") or item.get("description") or ""
-                    }
-                    for item in data["items"]
-                ]
-    except Exception as e:
-        print(f"   ⚠️ rss2json falló: {e}")
-
-    # Método de respaldo directo
-    try:
-        resp_direct = requests.get(url_rss, headers=HEADERS, timeout=15, allow_redirects=True)
-        if resp_direct.status_code == 200:
-            feed = feedparser.parse(resp_direct.content)
-            print(f"   ✔ Recuperado vía feedparser directo ({len(feed.entries)} entradas)")
-            items = []
-            for entry in feed.entries:
-                pub_date = getattr(entry, 'published', '') or getattr(entry, 'updated', '')
-                content = ""
-                if "content" in entry and len(entry.content) > 0:
-                    content = entry.content[0].value
-                elif "summary" in entry:
-                    content = entry.summary
-                    
-                items.append({
-                    "title": entry.get("title", "").strip(),
-                    "link": entry.get("link", "").strip(),
-                    "pubDate": pub_date,
-                    "content": content
-                })
-            return items
-    except Exception as e:
-        print(f"   ❌ Error directo: {e}")
-
-    return []
-
-def obtener_noticias_recientes():
+def obtener_noticias_wp_api():
     noticias = []
     hace_30_dias = datetime.now(timezone.utc) - timedelta(days=30)
     
     for fuente in FUENTES:
-        print(f"📡 Recuperando noticias de {fuente['nombre']} ({fuente['url_rss']})...")
-        items = obtener_items_feed(fuente["url_rss"])
-        print(f"   Artículos encontrados: {len(items)}")
-        
-        for item in items:
-            titulo = item.get("title", "")
-            url = item.get("link", "")
-            pub_date_str = item.get("pubDate", "")
-            
-            fecha_dt = datetime.now(timezone.utc)
-            if pub_date_str:
-                for fmt in ["%Y-%m-%d %H:%M:%S", "%a, %d %b %Y %H:%M:%S %z", "%a, %d %b %Y %H:%M:%S GMT"]:
+        print(f"📡 Consultando API de {fuente['nombre']}...")
+        try:
+            resp = requests.get(fuente["url_api"], headers=HEADERS, timeout=15)
+            if resp.status_code == 200:
+                posts = resp.json()
+                print(f"   Artículos recibidos: {len(posts)}")
+                
+                for post in posts:
+                    titulo = limpiar_html(post.get("title", {}).get("rendered", ""))
+                    url = post.get("link", "").strip()
+                    date_str = post.get("date_gmt", "")
+                    
                     try:
-                        fecha_dt = datetime.strptime(pub_date_str, fmt)
-                        if fecha_dt.tzinfo is None:
-                            fecha_dt = fecha_dt.replace(tzinfo=timezone.utc)
-                        break
+                        fecha_dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
                     except:
-                        pass
-                
-            if fecha_dt < hace_30_dias:
-                continue
-                
-            texto_limpio = limpiar_html(item.get("content", ""))
+                        fecha_dt = datetime.now(timezone.utc)
+                        
+                    if fecha_dt < hace_30_dias:
+                        continue
+                        
+                    content_raw = post.get("content", {}).get("rendered", "")
+                    texto_limpio = limpiar_html(content_raw)
+                    
+                    if titulo and url:
+                        noticias.append({
+                            "fuente": fuente["nombre"],
+                            "titulo": titulo,
+                            "url": url,
+                            "fecha": fecha_dt.strftime('%Y-%m-%d %H:%M:%S'),
+                            "texto": texto_limpio
+                        })
+            else:
+                print(f"   ⚠️ Error en respuesta API: Código HTTP {resp.status_code}")
+        except Exception as e:
+            print(f"   ❌ Error conectando a API de {fuente['nombre']}: {e}")
             
-            if titulo and url:
-                noticias.append({
-                    "fuente": fuente["nombre"],
-                    "titulo": titulo,
-                    "url": url,
-                    "fecha": fecha_dt.strftime('%Y-%m-%d %H:%M:%S'),
-                    "texto": texto_limpio
-                })
-                
     return noticias
 
 def analizar_con_llm(titulo, texto, fuente):
@@ -180,7 +138,7 @@ def analizar_con_llm(titulo, texto, fuente):
 
 def ejecutar_agente():
     inicializar_bd()
-    noticias = obtener_noticias_recientes()
+    noticias = obtener_noticias_wp_api()
     print(f"\n📰 Total de noticias recuperadas para procesar: {len(noticias)}")
     
     conn = sqlite3.connect(DB_NAME)
