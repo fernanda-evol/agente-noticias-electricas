@@ -15,12 +15,12 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 FUENTES = [
     {
         "nombre": "Revista EI", 
-        "url_api": "https://www.revistaei.cl/wp-json/wp/v2/posts?per_page=40",
+        "url_api": "https://www.revistaei.cl/wp-json/wp/v2/posts?per_page=50",
         "url_rss": "https://www.revistaei.cl/feed/"
     },
     {
         "nombre": "ElectroMinería", 
-        "url_api": "https://www.electromineria.cl/wp-json/wp/v2/posts?per_page=40",
+        "url_api": "https://www.electromineria.cl/wp-json/wp/v2/posts?per_page=50",
         "url_rss": "https://www.electromineria.cl/feed/"
     }
 ]
@@ -29,7 +29,7 @@ DB_NAME = "noticias_energia.db"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/javascript, */*; q=0.01"
+    "Accept": "*/*"
 }
 
 PALABRAS_EXCLUIR_EMPLEO = [
@@ -39,12 +39,10 @@ PALABRAS_EXCLUIR_EMPLEO = [
     "bolsa de trabajo", "oportunidad laboral"
 ]
 
-def inicializar_bd(reset=True):
+def inicializar_bd():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    if reset:
-        cursor.execute("DROP TABLE IF EXISTS noticias")
-        
+    # Mantenemos la estructura limpia sin borrar la tabla
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS noticias (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,6 +58,7 @@ def inicializar_bd(reset=True):
             procesado_el TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute("DELETE FROM noticias WHERE LOWER(titulo) LIKE '%ofertas de empleo%' OR LOWER(titulo) LIKE '%vacantes%'")
     conn.commit()
     conn.close()
 
@@ -76,6 +75,22 @@ def es_oferta_empleo(titulo, texto):
     contenido = f"{titulo} {texto}".lower()
     return any(palabra in contenido for palabra in PALABRAS_EXCLUIR_EMPLEO)
 
+def deducir_categoria(titulo, texto):
+    contenido = f"{titulo} {texto}".lower()
+    if any(k in contenido for k in ["bess", "almacenamiento", "batería", "baterias"]):
+        return "Almacenamiento (BESS)"
+    elif any(k in contenido for k in ["transmisión", "línea", "subestación", "subestacion"]):
+        return "Transmisión"
+    elif any(k in contenido for k in ["cne", "coordinador", "regulación", "norma", "ley", "decreto"]):
+        return "Regulación/Normativa"
+    elif any(k in contenido for k in ["pmgd", "distribución", "distribucion"]):
+        return "PMGD/Distribución"
+    elif any(k in contenido for k in ["hidrógeno", "hidrogeno", "descarbonización"]):
+        return "Hidrógeno Verde/Descarbonización"
+    elif any(k in contenido for k in ["precio", "spot", "cmg", "costo marginal", "mayorista"]):
+        return "Mercado Mayorista/Precios"
+    return "Generación/ERNC"
+
 def obtener_noticias():
     noticias_map = {}
     hace_30_dias = datetime.now(timezone.utc) - timedelta(days=30)
@@ -83,13 +98,12 @@ def obtener_noticias():
     for fuente in FUENTES:
         print(f"📡 Consultando fuente: {fuente['nombre']}...")
         
-        # 1. API WordPress REST
+        # 1. API WordPress
         try:
             resp = requests.get(fuente["url_api"], headers=HEADERS, timeout=15, verify=False)
             if resp.status_code == 200:
                 posts = resp.json()
                 if isinstance(posts, list):
-                    print(f"   [API WP] {len(posts)} artículos obtenidos de {fuente['nombre']}.")
                     for post in posts:
                         titulo = limpiar_html(post.get("title", {}).get("rendered", ""))
                         url_oficial = post.get("link", "").strip()
@@ -167,28 +181,39 @@ def analizar_con_llm(titulo, texto, fuente):
     if es_oferta_empleo(titulo, texto):
         return {"es_relevante": False}
 
+    cat_fallback = deducir_categoria(titulo, texto)
+    resumen_fallback = (texto[:220] + "...") if len(texto) > 50 else titulo
+    
+    fallback_result = {
+        "es_relevante": True,
+        "categoria": cat_fallback,
+        "resumen_ejecutivo": resumen_fallback,
+        "impacto_mercado": "Medio",
+        "actores_mencionados": [],
+        "sentimiento": "Neutro"
+    }
+
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        print("❌ GEMINI_API_KEY no encontrada.")
-        return None
+        return fallback_result
 
     client = genai.Client(api_key=api_key)
     
     prompt = f"""
-    Eres un analista senior del mercado eléctrico chileno.
-    Analiza esta noticia publicada en {fuente}:
+    Eres un analista experto del mercado eléctrico chileno.
+    Analiza esta noticia de {fuente}:
     
     Título: {titulo}
     Texto: {texto[:2500]}
     
-    SI ES OFERTA DE TRABAJO O RECLUTAMIENTO, RESPONDE EXACTAMENTE: {{"es_relevante": false}}
+    SI ES OFERTA DE EMPLEO, RESPONDE: {{"es_relevante": false}}
 
     DE LO CONTRARIO, RESPONDE EN JSON ESTRICTO CON:
     1. "es_relevante": true
-    2. "categoria": Elige la mejor entre ["Transmisión", "Almacenamiento (BESS)", "Generación/ERNC", "Regulación/Normativa", "Mercado Mayorista/Precios", "PMGD/Distribución", "Hidrógeno Verde/Descarbonización"].
+    2. "categoria": Elige entre ["Transmisión", "Almacenamiento (BESS)", "Generación/ERNC", "Regulación/Normativa", "Mercado Mayorista/Precios", "PMGD/Distribución", "Hidrógeno Verde/Descarbonización"].
     3. "resumen_ejecutivo": Párrafo técnico de 2-3 oraciones sintetizando el impacto.
-    4. "impacto_mercado": Elige estrictamente entre ["Alto", "Medio", "Bajo"].
-    5. "actores_mencionados": Lista de empresas, autoridades u organismos mencionados (ej. ["CNE", "Coordinador Eléctrico", "Enel"]).
+    4. "impacto_mercado": Elige entre ["Alto", "Medio", "Bajo"].
+    5. "actores_mencionados": Lista con nombres de empresas o instituciones (ej. ["CNE", "Coordinador Eléctrico"]).
     6. "sentimiento": Elige entre ["Positivo", "Neutro", "Riesgo/Negativo"].
     """
 
@@ -205,14 +230,13 @@ def analizar_con_llm(titulo, texto, fuente):
                 res_json = json.loads(cleaned)
                 if isinstance(res_json, dict) and "categoria" in res_json:
                     return res_json
-        except Exception as e:
-            print(f" Error modelo {model_name}: {e}")
+        except Exception:
             continue
 
-    return None
+    return fallback_result
 
 def ejecutar_agente():
-    inicializar_bd(reset=True)
+    inicializar_bd()
     
     noticias = obtener_noticias()
     print(f"\n📰 Total de noticias recuperadas: {len(noticias)}")
@@ -228,7 +252,7 @@ def ejecutar_agente():
         if cursor.fetchone():
             continue
             
-        print(f"🧠 Analizando con IA: {item['titulo'][:50]}...")
+        print(f"🧠 Procesando: {item['titulo'][:50]}...")
         analisis = analizar_con_llm(item["titulo"], item["texto"], item["fuente"])
         
         if analisis and analisis.get("es_relevante", True):
@@ -245,15 +269,15 @@ def ejecutar_agente():
                 item["titulo"],
                 url_oficial,
                 item["fecha"],
-                analisis.get("categoria", "Regulación/Normativa"),
-                analisis.get("resumen_ejecutivo", ""),
+                analisis.get("categoria", "Generación/ERNC"),
+                analisis.get("resumen_ejecutivo", item["titulo"]),
                 analisis.get("impacto_mercado", "Medio"),
                 json.dumps(actores_list, ensure_ascii=False),
                 analisis.get("sentimiento", "Neutro")
             ))
             conn.commit()
             noticias_guardadas += 1
-            print(f"✅ Guardada con éxito.")
+            print(f"✅ Guardada en BD.")
             
     conn.close()
     print(f"\n🚀 Proceso finalizado. {noticias_guardadas} noticias procesadas en BD.")
