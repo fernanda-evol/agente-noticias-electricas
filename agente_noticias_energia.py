@@ -7,7 +7,6 @@ import os
 import re
 import calendar
 from datetime import datetime, timedelta, timezone
-import time
 from google import genai
 
 FUENTES = [
@@ -16,7 +15,12 @@ FUENTES = [
 ]
 
 DB_NAME = "noticias_energia.db"
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8"
+}
 
 def inicializar_bd():
     conn = sqlite3.connect(DB_NAME)
@@ -46,50 +50,62 @@ def limpiar_html(html_content):
     texto = soup.get_text(separator=" ")
     return re.sub(r'\s+', ' ', texto).strip()
 
-def obtener_noticias_recientes_7dias():
+def obtener_noticias_recientes():
     noticias = []
-    hace_7_dias = datetime.now(timezone.utc) - timedelta(days=7)
+    hace_30_dias = datetime.now(timezone.utc) - timedelta(days=30)
     
     for fuente in FUENTES:
-        print(f"📡 Leyendo feed de {fuente['nombre']}...")
-        feed = feedparser.parse(fuente["url_rss"], agent=USER_AGENT)
-        print(f"   Entradas encontradas: {len(feed.entries)}")
-        
-        for entry in feed.entries:
-            if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                timestamp = calendar.timegm(entry.published_parsed)
-                fecha_noticia = datetime.fromtimestamp(timestamp, tz=timezone.utc)
-            else:
-                fecha_noticia = datetime.now(timezone.utc)
-
-            if fecha_noticia < hace_7_dias:
+        print(f"📡 Descargando feed de {fuente['nombre']} ({fuente['url_rss']})...")
+        try:
+            resp = requests.get(fuente["url_rss"], headers=HEADERS, timeout=20)
+            print(f"   Código HTTP: {resp.status_code}")
+            
+            if resp.status_code != 200:
+                print(f"   ⚠️ No se pudo descargar el feed. Estado: {resp.status_code}")
                 continue
                 
-            url = entry.link
-            titulo = entry.title
+            feed = feedparser.parse(resp.content)
+            print(f"   Entradas encontradas: {len(feed.entries)}")
             
-            contenido_raw = ""
-            if "content" in entry and len(entry.content) > 0:
-                contenido_raw = entry.content[0].value
-            elif "summary" in entry:
-                contenido_raw = entry.summary
+            for entry in feed.entries:
+                parsed_time = getattr(entry, 'published_parsed', None) or getattr(entry, 'updated_parsed', None)
+                if parsed_time:
+                    timestamp = calendar.timegm(parsed_time)
+                    fecha_noticia = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+                else:
+                    fecha_noticia = datetime.now(timezone.utc)
+
+                if fecha_noticia < hace_30_dias:
+                    continue
+                    
+                url = entry.link
+                titulo = entry.title
                 
-            contenido_limpio = limpiar_html(contenido_raw)
-            
-            noticias.append({
-                "fuente": fuente["nombre"],
-                "titulo": titulo,
-                "url": url,
-                "fecha": fecha_noticia.strftime('%Y-%m-%d %H:%M:%S'),
-                "texto": contenido_limpio
-            })
+                contenido_raw = ""
+                if "content" in entry and len(entry.content) > 0:
+                    contenido_raw = entry.content[0].value
+                elif "summary" in entry:
+                    contenido_raw = entry.summary
+                    
+                contenido_limpio = limpiar_html(contenido_raw)
+                
+                noticias.append({
+                    "fuente": fuente["nombre"],
+                    "titulo": titulo,
+                    "url": url,
+                    "fecha": fecha_noticia.strftime('%Y-%m-%d %H:%M:%S'),
+                    "texto": contenido_limpio
+                })
+        except Exception as e:
+            print(f"   ❌ Error al conectar con {fuente['nombre']}: {e}")
             
     return noticias
 
 def analizar_con_llm(titulo, texto, fuente):
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError("Error: No se encontró la variable GEMINI_API_KEY en el entorno.")
+        print("❌ Error: No se encontró la variable GEMINI_API_KEY en el entorno.")
+        return None
 
     client = genai.Client(api_key=api_key)
     
@@ -124,8 +140,8 @@ def analizar_con_llm(titulo, texto, fuente):
 
 def ejecutar_agente():
     inicializar_bd()
-    noticias = obtener_noticias_recientes_7dias()
-    print(f"📰 Total de noticias recuperadas (últimos 7 días): {len(noticias)}")
+    noticias = obtener_noticias_recientes()
+    print(f"\n📰 Total de noticias recuperadas: {len(noticias)}")
     
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -134,10 +150,10 @@ def ejecutar_agente():
     for item in noticias:
         cursor.execute("SELECT id FROM noticias WHERE url = ?", (item["url"],))
         if cursor.fetchone():
-            print(f"⏭️ Noticia ya registrada: {item['titulo'][:40]}...")
+            print(f"⏭️ Ya registrada: {item['titulo'][:40]}...")
             continue
             
-        print(f"🧠 Analizando: {item['titulo'][:50]}...")
+        print(f"🧠 Analizando con Gemini: {item['titulo'][:50]}...")
         analisis = analizar_con_llm(item["titulo"], item["texto"], item["fuente"])
         
         if analisis:
@@ -150,7 +166,7 @@ def ejecutar_agente():
                 item["titulo"],
                 item["url"],
                 item["fecha"],
-                analisis.get("categoria", "Sin Categoria"),
+                analisis.get("categoria", "Sin Categoría"),
                 analisis.get("resumen_ejecutivo", ""),
                 analisis.get("impacto_mercado", "Bajo"),
                 json.dumps(analisis.get("actores_mencionados", []), ensure_ascii=False),
