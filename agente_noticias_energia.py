@@ -1,11 +1,12 @@
 import requests
+import feedparser
+from bs4 import BeautifulSoup
 import sqlite3
 import json
 import os
 import re
 import urllib3
 from datetime import datetime, timezone
-from bs4 import BeautifulSoup
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -13,13 +14,13 @@ DB_NAME = "noticias_energia.db"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/json,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8"
 }
 
 def inicializar_bd():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    # RESET=FALSE: NUNCA BORRAMOS LA TABLA. El historial se respeta siempre.
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS noticias (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,18 +101,33 @@ def obtener_noticias():
     except Exception as e:
         print(f"Error Revista EI: {e}")
 
-    # 2. ElectroMinería (API WP)
+    # 2. ElectroMinería (Extracción dual: API de categoría específica + RSS)
     try:
-        resp = requests.get("https://electromineria.cl/wp-json/wp/v2/posts?per_page=30", headers=HEADERS, timeout=15, verify=False)
-        if resp.status_code == 200:
-            for post in resp.json():
-                titulo = limpiar_html(post.get("title", {}).get("rendered", ""))
-                url = post.get("link", "").strip()
-                texto = limpiar_html(post.get("content", {}).get("rendered", ""))
-                if titulo and url:
-                    noticias.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": texto, "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')})
+        resp_em = requests.get("https://electromineria.cl/wp-json/wp/v2/posts?categories=3&per_page=30", headers=HEADERS, timeout=15, verify=False)
+        if resp_em.status_code == 200:
+            posts = resp_em.json()
+            if isinstance(posts, list):
+                for post in posts:
+                    titulo = limpiar_html(post.get("title", {}).get("rendered", ""))
+                    url = post.get("link", "").strip()
+                    texto = limpiar_html(post.get("content", {}).get("rendered", ""))
+                    if titulo and url:
+                        noticias.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": texto, "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')})
     except Exception as e:
-        print(f"Error ElectroMinería: {e}")
+        print(f"Error API ElectroMinería: {e}")
+
+    try:
+        resp_rss = requests.get("https://electromineria.cl/feed/", headers=HEADERS, timeout=15, verify=False)
+        if resp_rss.status_code == 200:
+            feed = feedparser.parse(resp_rss.content)
+            for entry in feed.entries:
+                titulo = getattr(entry, 'title', '').strip()
+                url = getattr(entry, 'link', '').strip()
+                if titulo and url:
+                    content_raw = entry.content[0].value if "content" in entry and len(entry.content) > 0 else getattr(entry, 'summary', '')
+                    noticias.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": limpiar_html(content_raw), "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')})
+    except Exception as e:
+        print(f"Error RSS ElectroMinería: {e}")
 
     return noticias
 
