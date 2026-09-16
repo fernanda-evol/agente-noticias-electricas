@@ -12,7 +12,7 @@ from google import genai
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-FUENTES = [
+FUENTES_API = [
     {
         "nombre": "Revista EI", 
         "url_api": "https://www.revistaei.cl/wp-json/wp/v2/posts?per_page=50",
@@ -25,11 +25,12 @@ FUENTES = [
     }
 ]
 
+URL_ELECTROMINERIA_ENERGIA = "https://electromineria.cl/category/panorama-energetico/"
 DB_NAME = "noticias_energia.db"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/xml, */*"
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
 }
 
 PALABRAS_EXCLUIR_EMPLEO = [
@@ -74,36 +75,52 @@ def es_oferta_empleo(titulo, texto):
     contenido = f"{titulo} {texto}".lower()
     return any(palabra in contenido for palabra in PALABRAS_EXCLUIR_EMPLEO)
 
-def deducir_categoria(titulo, texto):
-    contenido = f"{titulo} {texto}".lower()
-    if any(k in contenido for k in ["bess", "almacenamiento", "batería", "baterias"]):
-        return "Almacenamiento (BESS)"
-    elif any(k in contenido for k in ["transmisión", "transmision", "línea", "subestación"]):
-        return "Transmisión"
-    elif any(k in contenido for k in ["cne", "coordinador", "regulación", "norma", "ley", "decreto", "reglamento"]):
-        return "Regulación/Normativa"
-    elif any(k in contenido for k in ["pmgd", "distribución", "distribucion"]):
-        return "PMGD/Distribución"
-    elif any(k in contenido for k in ["hidrógeno", "hidrogeno", "descarbonización"]):
-        return "Hidrógeno Verde/Descarbonización"
-    elif any(k in contenido for k in ["precio", "spot", "cmg", "costo marginal", "tarifa"]):
-        return "Mercado Mayorista/Precios"
-    return "Generación/ERNC"
+def extraer_panorama_energetico_electromineria():
+    noticias = []
+    try:
+        print(f"🕸️ Extrayendo directamente desde categoría: {URL_ELECTROMINERIA_ENERGIA}")
+        resp = requests.get(URL_ELECTROMINERIA_ENERGIA, headers=HEADERS, timeout=15, verify=False)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.content, "html.parser")
+            articulos = soup.find_all(["article", "div"], class_=re.compile(r'post|entry|item|article'))
+            
+            for art in articulos:
+                a_tag = art.find("a", href=True)
+                h_tag = art.find(["h1", "h2", "h3", "h4"]) or a_tag
+                
+                if a_tag and h_tag:
+                    url = a_tag["href"].strip()
+                    titulo = limpiar_html(h_tag.get_text())
+                    
+                    if titulo and url and "electromineria.cl" in url and not es_oferta_empleo(titulo, ""):
+                        noticias.append({
+                            "fuente": "ElectroMinería",
+                            "titulo": titulo,
+                            "url": url,
+                            "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+                            "texto": titulo
+                        })
+            print(f"   [Web Scraper] {len(noticias)} artículos encontrados en Panorama Energético.")
+    except Exception as e:
+        print(f"⚠️ Error al extraer Panorama Energético: {e}")
+    return noticias
 
 def obtener_noticias():
     noticias_map = {}
     hace_30_dias = datetime.now(timezone.utc) - timedelta(days=30)
     
-    for fuente in FUENTES:
-        print(f"📡 Consultando fuente: {fuente['nombre']}...")
-        
-        # 1. API WordPress REST
+    # 1. Extracción directa de la sección Panorama Energético de ElectroMinería
+    for item in extraer_panorama_energetico_electromineria():
+        noticias_map[item["url"]] = item
+
+    # 2. Extracción vía API REST y RSS
+    for fuente in FUENTES_API:
+        print(f"📡 Consultando API/RSS: {fuente['nombre']}...")
         try:
             resp = requests.get(fuente["url_api"], headers=HEADERS, timeout=15, verify=False)
             if resp.status_code == 200:
                 posts = resp.json()
                 if isinstance(posts, list):
-                    print(f"   [API WP] {len(posts)} artículos obtenidos de {fuente['nombre']}.")
                     for post in posts:
                         titulo = limpiar_html(post.get("title", {}).get("rendered", ""))
                         url_oficial = post.get("link", "").strip()
@@ -138,43 +155,6 @@ def obtener_noticias():
         except Exception as e:
             print(f"   ⚠️ Error API WP ({fuente['nombre']}): {e}")
 
-        # 2. Respaldo Feed RSS
-        try:
-            resp_rss = requests.get(fuente["url_rss"], headers=HEADERS, timeout=15, verify=False)
-            if resp_rss.status_code == 200:
-                feed = feedparser.parse(resp_rss.content)
-                for entry in feed.entries:
-                    titulo = getattr(entry, 'title', '').strip()
-                    url_oficial = getattr(entry, 'link', '').strip()
-
-                    if not url_oficial or es_oferta_empleo(titulo, ""):
-                        continue
-
-                    if url_oficial not in noticias_map:
-                        parsed_time = getattr(entry, 'published_parsed', None)
-                        fecha_dt = datetime.now(timezone.utc)
-                        if parsed_time:
-                            fecha_dt = datetime.fromtimestamp(calendar.timegm(parsed_time), tz=timezone.utc)
-
-                        if fecha_dt < hace_30_dias:
-                            continue
-
-                        content_raw = ""
-                        if "content" in entry and len(entry.content) > 0:
-                            content_raw = entry.content[0].value
-                        elif "summary" in entry:
-                            content_raw = entry.summary
-
-                        noticias_map[url_oficial] = {
-                            "fuente": fuente["nombre"],
-                            "titulo": titulo,
-                            "url": url_oficial,
-                            "fecha": fecha_dt.strftime('%Y-%m-%d %H:%M:%S'),
-                            "texto": limpiar_html(content_raw)
-                        }
-        except Exception as e:
-            print(f"   ⚠️ Error RSS ({fuente['nombre']}): {e}")
-
     return list(noticias_map.values())
 
 def analizar_con_llm(titulo, texto, fuente):
@@ -189,27 +169,26 @@ def analizar_con_llm(titulo, texto, fuente):
     client = genai.Client(api_key=api_key)
     
     prompt = f"""
-    Eres un analista experto en el mercado eléctrico chileno.
-    Analiza técnicamente el siguiente artículo publicado en {fuente}:
+    Eres un analista experto del mercado eléctrico chileno (CNE, Coordinador Eléctrico, BESS, Transmisión, PMGD, Precios Spot).
+    Analiza la noticia de {fuente}:
     
     Título: {titulo}
     Texto: {texto[:2500]}
     
-    REGLA DE EXCLUSIÓN: Si la noticia es una oferta de empleo, aviso laboral o publicidad, responde estrictamente:
-    {{"es_relevante": false}}
+    SI ES OFERTA DE EMPLEO, AVISO O PUBLICIDAD RESPONDE: {{"es_relevante": false}}
 
-    REGLAS ESTRICTAS DE CLASIFICACIÓN DE "impacto_mercado":
-    - "Alto": Regulaciones/Leyes/Dictámenes (CNE, Coordinador, Ministerio), proyectos BESS o Transmisión > US$50M o >100MW, vertimientos masivos o cambios tarifarios/sistémicos.
-    - "Medio": Posicionamiento de gremios (Acenor, Generadoras), proyectos PMGD/ERNC medianos, hitos de operación comercial, acuerdos PPA.
-    - "Bajo": Anuncios corporativos menores, nombramientos directivos, premios o eventos.
+    CLASIFICACIÓN ESTRICTA DE "impacto_mercado":
+    - "Alto": Leyes, reglamentos, resoluciones CNE/Coordinador, proyectos BESS o Transmisión >US$50M o >100MW, vertimientos masivos o alzas tarifarias.
+    - "Medio": Posicionamiento de gremios (Acenor, Generadoras), proyectos PMGD, hitos de construcción/ingreso ambiental, contratos PPA.
+    - "Bajo": Nombramientos de ejecutivos, eventos, ferias, actividades RSE.
 
-    Responde ÚNICAMENTE en JSON estricto con las siguientes llaves:
+    Responde ÚNICAMENTE en JSON estricto:
     1. "es_relevante": true
-    2. "categoria": Elige la más precisa entre ["Transmisión", "Almacenamiento (BESS)", "Generación/ERNC", "Regulación/Normativa", "Mercado Mayorista/Precios", "PMGD/Distribución", "Hidrógeno Verde/Descarbonización"].
-    3. "resumen_ejecutivo": Un párrafo técnico de 2-3 oraciones sintetizando el impacto real.
-    4. "impacto_mercado": Elige estrictamente entre ["Alto", "Medio", "Bajo"] siguiendo las reglas anteriores.
-    5. "actores_mencionados": Lista con los nombres exactos de empresas, autoridades o gremios mencionados (ej. ["Acenor", "CNE", "Coordinador Eléctrico"]).
-    6. "sentimiento": Elige entre ["Positivo", "Neutro", "Riesgo/Negativo"].
+    2. "categoria": Selección estricta entre ["Transmisión", "Almacenamiento (BESS)", "Generación/ERNC", "Regulación/Normativa", "Mercado Mayorista/Precios", "PMGD/Distribución", "Hidrógeno Verde/Descarbonización"].
+    3. "resumen_ejecutivo": Párrafo técnico de 2-3 oraciones sintetizando el impacto operativo/regulatorio.
+    4. "impacto_mercado": "Alto", "Medio" o "Bajo".
+    5. "actores_mencionados": Lista con nombres exactos de empresas u organismos citados (ej. ["Acenor", "CNE", "Coordinador Eléctrico", "Enel"]).
+    6. "sentimiento": "Positivo", "Neutro", o "Riesgo/Negativo".
     """
 
     for model_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
@@ -228,24 +207,46 @@ def analizar_con_llm(titulo, texto, fuente):
         except Exception:
             continue
 
-    cat_deducida = deducir_categoria(titulo, texto)
-    return {
-        "es_relevante": True,
-        "categoria": cat_deducida,
-        "resumen_ejecutivo": (texto[:200] + "...") if texto else titulo,
-        "impacto_mercado": "Medio",
-        "actores_mencionados": [],
-        "sentimiento": "Neutro"
-    }
+    return None
 
 def ejecutar_agente():
     inicializar_bd()
     
-    noticias = obtener_noticias()
-    print(f"\n📰 Total de noticias recuperadas para procesar: {len(noticias)}")
-    
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
+
+    # --- FASE 1: REPARAR REGISTROS ANTIGUOS SIN ANÁLISIS EN PROFUNDIDAD ---
+    cursor.execute("SELECT id, fuente, titulo, url, texto FROM noticias WHERE actores_mencionados = '[]' OR actores_mencionados = '\"[]\"'")
+    filas_a_reparar = cursor.fetchall()
+    
+    if filas_a_reparar:
+        print(f"🛠️ Re-analizando {len(filas_a_reparar)} registros genéricos en base de datos...")
+        for row_id, fuente, titulo, url, texto_db in filas_a_reparar:
+            contenido = texto_db if texto_db else titulo
+            analisis = analizar_con_llm(titulo, contenido, fuente)
+            if analisis and analisis.get("es_relevante", True):
+                actores_list = analisis.get("actores_mencionados", [])
+                if not isinstance(actores_list, list):
+                    actores_list = [str(actores_list)] if actores_list else []
+                    
+                cursor.execute('''
+                    UPDATE noticias 
+                    SET categoria = ?, resumen_ejecutivo = ?, impacto_mercado = ?, actores_mencionados = ?, sentimiento = ?
+                    WHERE id = ?
+                ''', (
+                    analisis.get("categoria", "Regulación/Normativa"),
+                    analisis.get("resumen_ejecutivo", titulo),
+                    analisis.get("impacto_mercado", "Medio"),
+                    json.dumps(actores_list, ensure_ascii=False),
+                    analisis.get("sentimiento", "Neutro"),
+                    row_id
+                ))
+                conn.commit()
+                print(f"   🔄 Registro #{row_id} actualizado con IA.")
+
+    # --- FASE 2: PROCESAR PUBLICACIONES NUEVAS ---
+    noticias = obtener_noticias()
+    print(f"\n📰 Total de noticias recuperadas para procesar: {len(noticias)}")
 
     noticias_guardadas = 0
     for item in noticias:
@@ -255,7 +256,7 @@ def ejecutar_agente():
         if cursor.fetchone():
             continue
             
-        print(f"🧠 Analizando con Gemini: {item['titulo'][:50]}...")
+        print(f"🧠 Analizando noticia nueva: {item['titulo'][:50]}...")
         analisis = analizar_con_llm(item["titulo"], item["texto"], item["fuente"])
         
         if analisis and analisis.get("es_relevante", True):
@@ -280,10 +281,10 @@ def ejecutar_agente():
             ))
             conn.commit()
             noticias_guardadas += 1
-            print(f"✅ Guardada con éxito.")
+            print(f"✅ Noticia agregada.")
             
     conn.close()
-    print(f"\n🚀 Proceso finalizado. {noticias_guardadas} noticias guardadas en BD.")
+    print(f"\n🚀 Proceso finalizado. {noticias_guardadas} noticias agregadas a {DB_NAME}.")
 
 if __name__ == "__main__":
     ejecutar_agente()
