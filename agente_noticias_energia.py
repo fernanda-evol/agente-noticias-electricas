@@ -6,10 +6,8 @@ import json
 import os
 import re
 import calendar
-import time
 import urllib3
 from datetime import datetime, timedelta, timezone
-from google import genai
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -18,8 +16,7 @@ DB_NAME = "noticias_energia.db"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-    "Cache-Control": "no-cache"
+    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8"
 }
 
 PALABRAS_EXCLUIR_EMPLEO = [
@@ -75,201 +72,150 @@ def es_oferta_empleo(titulo, texto):
     contenido = f"{titulo} {texto}".lower()
     return any(palabra in contenido for palabra in PALABRAS_EXCLUIR_EMPLEO)
 
-def clasificar_localmente(titulo, texto):
+def clasificar_inteligente(titulo, texto):
     contenido = f"{titulo} {texto}".lower()
     
+    # Categorías técnicas
     cat = "Generación/ERNC"
     if any(k in contenido for k in ["bess", "almacenamiento", "batería", "baterias"]):
         cat = "Almacenamiento (BESS)"
-    elif any(k in contenido for k in ["transmisión", "transmision", "línea", "subestación"]):
+    elif any(k in contenido for k in ["transmisión", "transmision", "línea", "subestación", "subestacion"]):
         cat = "Transmisión"
-    elif any(k in contenido for k in ["cne", "coordinador", "regulación", "norma", "ley", "decreto", "tarifas"]):
+    elif any(k in contenido for k in ["cne", "coordinador", "regulación", "norma", "ley", "decreto", "tarifas", "comisión nacional de energía"]):
         cat = "Regulación/Normativa"
     elif any(k in contenido for k in ["pmgd", "distribución", "distribucion"]):
         cat = "PMGD/Distribución"
-    elif any(k in contenido for k in ["hidrógeno", "hidrogeno", "descarbonización"]):
+    elif any(k in contenido for k in ["hidrógeno", "hidrogeno", "descarbonización", "descarbonizacion"]):
         cat = "Hidrógeno Verde/Descarbonización"
     elif any(k in contenido for k in ["precio", "spot", "cmg", "costo marginal", "mayorista"]):
         cat = "Mercado Mayorista/Precios"
 
+    # Niveles de impacto con criterios objetivos
     impacto = "Medio"
-    if any(k in contenido for k in ["cne", "coordinador eléctrico", "decreto", "ley", "resolución", "vertimiento", "insolvencia", "licitación", "mw", "us$"]):
+    if any(k in contenido for k in ["cne", "coordinador eléctrico", "decreto", "ley", "resolución", "vertimiento", "insolvencia", "licitación", "mw", "us$", "millones"]):
         impacto = "Alto"
-    elif any(k in contenido for k in ["nombramiento", "premio", "evento", "reconocimiento", "aniversario"]):
+    elif any(k in contenido for k in ["nombramiento", "premio", "evento", "reconocimiento", "aniversario", "feria"]):
         impacto = "Bajo"
 
+    # Actores clave del mercado chileno
     actores = []
     if "acenor" in contenido: actores.append("Acenor")
     if "cne" in contenido: actores.append("CNE")
     if "coordinador" in contenido: actores.append("Coordinador Eléctrico")
     if "enel" in contenido: actores.append("Enel")
     if "colbún" in contenido or "colbun" in contenido: actores.append("Colbún")
+    if "transelec" in contenido: actores.append("Transelec")
+    if "cge" in contenido: actores.append("CGE")
+    if "sec" in contenido: actores.append("SEC")
 
     return {
         "es_relevante": True,
         "categoria": cat,
-        "resumen_ejecutivo": (texto[:220] + "...") if len(texto) > 50 else titulo,
+        "resumen_ejecutivo": (texto[:250] + "...") if len(texto) > 50 else titulo,
         "impacto_mercado": impacto,
         "actores_mencionados": actores,
         "sentimiento": "Neutro"
     }
 
-def extraer_electromineria_divi():
-    noticias = []
-    url_seccion = "https://electromineria.cl/category/panorama-energetico/"
-    print(f"🕸️ Extrayendo con selector Divi desde: {url_seccion}...")
-    try:
-        resp = requests.get(url_seccion, headers=HEADERS, timeout=15, verify=False)
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.content, "html.parser")
-            
-            # Buscar contenedores estándar de WordPress y temas Divi
-            elementos = soup.find_all(["article", "div"], class_=re.compile(r'post|et_pb_post|entry'))
-            
-            for el in elementos:
-                # Buscar el enlace y el título dentro del bloque Divi
-                a_tag = el.find("a", href=True)
-                h_tag = el.find(["h2", "h3", "h4"])
-                
-                if a_tag and h_tag:
-                    url = normalizar_url(a_tag["href"])
-                    titulo = limpiar_html(h_tag.get_text())
-                    
-                    if url.startswith("https://electromineria.cl/") and not any(x in url for x in ["/category/", "/tag/", "/page/", "/author/", "#", "feed"]):
-                        if len(titulo) > 20 and not es_oferta_empleo(titulo, ""):
-                            noticias.append({
-                                "fuente": "ElectroMinería",
-                                "titulo": titulo,
-                                "url": url,
-                                "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
-                                "texto": titulo
-                            })
-            
-            # Método alternativo por si los bloques Divi varían: buscar todos los h2/h3 con enlaces directos
-            if not noticias:
-                for h in soup.find_all(["h2", "h3"]):
-                    a = h.find("a", href=True)
-                    if a:
-                        url = normalizar_url(a["href"])
-                        titulo = limpiar_html(h.get_text())
-                        if url.startswith("https://electromineria.cl/") and len(titulo) > 20 and not es_oferta_empleo(titulo, ""):
-                            noticias.append({
-                                "fuente": "ElectroMinería",
-                                "titulo": titulo,
-                                "url": url,
-                                "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
-                                "texto": titulo
-                            })
-
-            print(f"   [Scraper Divi] {len(noticias)} artículos extraídos de ElectroMinería.")
-    except Exception as e:
-        print(f"⚠️ Error en Scraper Divi ElectroMinería: {e}")
-    return noticias
-
 def obtener_noticias():
     noticias_map = {}
     hace_30_dias = datetime.now(timezone.utc) - timedelta(days=30)
     
-    # 1. Extracción Estructural Divi ElectroMinería
-    for item in extraer_electromineria_divi():
-        if item["url"] not in noticias_map:
-            noticias_map[item["url"]] = item
-
-    # 2. Extracción Revista EI (API WP)
-    print("📡 Consultando fuente: Revista EI...")
+    # 1. Extracción ElectroMinería (API REST WordPress + Scraper de sección)
+    print("📡 Consultando fuente: ElectroMinería...")
     try:
-        resp = requests.get("https://www.revistaei.cl/wp-json/wp/v2/posts?per_page=30", headers=HEADERS, timeout=15, verify=False)
-        if resp.status_code == 200:
-            posts = resp.json()
-            if isinstance(posts, list):
-                print(f"   [API WP] {len(posts)} artículos obtenidos de Revista EI.")
-                for post in posts:
+        resp_em = requests.get("https://electromineria.cl/wp-json/wp/v2/posts?per_page=30", headers=HEADERS, timeout=15, verify=False)
+        if resp_em.status_code == 200:
+            posts_em = resp_em.json()
+            if isinstance(posts_em, list):
+                print(f"   [API WP] {len(posts_em)} artículos obtenidos de ElectroMinería.")
+                for post in posts_em:
                     titulo = limpiar_html(post.get("title", {}).get("rendered", ""))
                     url_oficial = normalizar_url(post.get("link", ""))
-                    
                     if not url_oficial or es_oferta_empleo(titulo, ""):
                         continue
-
-                    date_str = post.get("date_gmt", "") or post.get("date", "")
-                    fecha_dt = datetime.now(timezone.utc)
-                    if date_str:
-                        date_clean = re.sub(r'\.\d+', '', date_str.replace("Z", ""))
-                        for fmt in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"]:
-                            try:
-                                fecha_dt = datetime.strptime(date_clean, fmt).replace(tzinfo=timezone.utc)
-                                break
-                            except ValueError:
-                                pass
-
-                    if fecha_dt < hace_30_dias:
-                        continue
-
                     texto_limpio = limpiar_html(post.get("content", {}).get("rendered", ""))
-                    
+                    if titulo and url_oficial not in noticias_map:
+                        noticias_map[url_oficial] = {
+                            "fuente": "ElectroMinería",
+                            "titulo": titulo,
+                            "url": url_oficial,
+                            "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+                            "texto": texto_limpio
+                        }
+    except Exception as e:
+        print(f"   ⚠️ Error API ElectroMinería: {e}")
+
+    # Scraper de respaldo directo para la sección Panorama Energético de ElectroMinería
+    try:
+        url_sec = "https://electromineria.cl/category/panorama-energetico/"
+        resp_sec = requests.get(url_sec, headers=HEADERS, timeout=15, verify=False)
+        if resp_sec.status_code == 200:
+            soup = BeautifulSoup(resp_sec.content, "html.parser")
+            for a_tag in soup.find_all("a", href=True):
+                href = normalizar_url(a_tag["href"])
+                titulo = limpiar_html(a_tag.get_text())
+                if href.startswith("https://electromineria.cl/") and not any(x in href for x in ["/category/", "/tag/", "/page/", "/author/", "#", "feed"]):
+                    if len(titulo) > 20 and not es_oferta_empleo(titulo, ""):
+                        if href not in noticias_map:
+                            noticias_map[href] = {
+                                "fuente": "ElectroMinería",
+                                "titulo": titulo,
+                                "url": href,
+                                "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+                                "texto": titulo
+                            }
+            print(f"   [Scraper HTML] Artículos totales de ElectroMinería actualizados.")
+    except Exception as e:
+        print(f"   ⚠️ Error Scraper ElectroMinería: {e}")
+
+    # 2. Extracción Revista EI (API WP + RSS)
+    print("📡 Consultando fuente: Revista EI...")
+    try:
+        resp_ei = requests.get("https://www.revistaei.cl/wp-json/wp/v2/posts?per_page=30", headers=HEADERS, timeout=15, verify=False)
+        if resp_ei.status_code == 200:
+            posts_ei = resp_ei.json()
+            if isinstance(posts_ei, list):
+                print(f"   [API WP] {len(posts_ei)} artículos obtenidos de Revista EI.")
+                for post in posts_ei:
+                    titulo = limpiar_html(post.get("title", {}).get("rendered", ""))
+                    url_oficial = normalizar_url(post.get("link", ""))
+                    if not url_oficial or es_oferta_empleo(titulo, ""):
+                        continue
+                    texto_limpio = limpiar_html(post.get("content", {}).get("rendered", ""))
                     if titulo and url_oficial not in noticias_map:
                         noticias_map[url_oficial] = {
                             "fuente": "Revista EI",
                             "titulo": titulo,
                             "url": url_oficial,
-                            "fecha": fecha_dt.strftime('%Y-%m-%d %H:%M:%S'),
+                            "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
                             "texto": texto_limpio
                         }
     except Exception as e:
         print(f"   ⚠️ Error Revista EI: {e}")
 
-    return list(noticias_map.values())
-
-def analizar_con_llm(titulo, texto, fuente):
-    if es_oferta_empleo(titulo, texto):
-        return {"es_relevante": False}
-
-    fallback_local = clasificar_localmente(titulo, texto)
-    
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        return fallback_local
-
-    client = genai.Client(api_key=api_key)
-    
-    prompt = f"""
-    Eres un analista experto en el mercado eléctrico chileno.
-    Analiza la noticia publicada en {fuente}:
-    
-    Título: {titulo}
-    Texto: {texto[:2500]}
-    
-    SI ES OFERTA DE EMPLEO O PUBLICIDAD, RESPONDE STRICTAMENTE: {{"es_relevante": false}}
-
-    CLASIFICACIÓN OBLIGATORIA DE "impacto_mercado":
-    - "Alto": Proyectos >US$ 50M o >100 MW (BESS, Transmisión, ERNC), decretos/resoluciones de CNE/Coordinador Eléctrico/Ministerio, alzas tarifarias, vertimientos masivos o insolvencias.
-    - "Medio": Declaraciones/estudios de gremios (Acenor, Generadoras, ACERA), proyectos PMGD, hitos de obra, contratos PPA, aprobaciones ambientales.
-    - "Bajo": Nombramientos corporativos, eventos, ferias, premiaciones, RSE.
-
-    Responde ÚNICAMENTE en JSON estricto con la siguiente estructura:
-    1. "es_relevante": true
-    2. "categoria": Selección estricta entre ["Transmisión", "Almacenamiento (BESS)", "Generación/ERNC", "Regulación/Normativa", "Mercado Mayorista/Precios", "PMGD/Distribución", "Hidrógeno Verde/Descarbonización"].
-    3. "resumen_ejecutivo": Párrafo técnico de 2-3 oraciones sintetizando el impacto real.
-    4. "impacto_mercado": Evalúa si es "Alto", "Medio" o "Bajo".
-    5. "actores_mencionados": Lista con nombres exactos de empresas u organismos citados (ej. ["Acenor", "CNE", "Coordinador Eléctrico"]).
-    6. "sentimiento": Elige entre ["Positivo", "Neutro", "Riesgo/Negativo"].
-    """
-
     try:
-        response = client.models.generate_content(
-            model="gemini-3.6-flash",
-            contents=prompt,
-            config={"response_mime_type": "application/json"}
-        )
-        if response.text:
-            cleaned = re.sub(r'^```json\s*', '', response.text.strip(), flags=re.MULTILINE)
-            cleaned = re.sub(r'^```\s*', '', cleaned, flags=re.MULTILINE).strip()
-            res_json = json.loads(cleaned)
-            if isinstance(res_json, dict) and "categoria" in res_json:
-                return res_json
+        resp_rss = requests.get("https://www.revistaei.cl/feed/", headers=HEADERS, timeout=15, verify=False)
+        if resp_rss.status_code == 200:
+            feed = feedparser.parse(resp_rss.content)
+            for entry in feed.entries:
+                titulo = getattr(entry, 'title', '').strip()
+                url_oficial = normalizar_url(getattr(entry, 'link', ''))
+                if not url_oficial or es_oferta_empleo(titulo, ""):
+                    continue
+                if url_oficial not in noticias_map:
+                    content_raw = entry.content[0].value if "content" in entry and len(entry.content) > 0 else getattr(entry, 'summary', '')
+                    noticias_map[url_oficial] = {
+                        "fuente": "Revista EI",
+                        "titulo": titulo,
+                        "url": url_oficial,
+                        "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+                        "texto": limpiar_html(content_raw)
+                    }
     except Exception as e:
-        print(f"⚠️ Límite de cuota Gemini o Error. Usando fallback inteligente local: {e}")
+        print(f"   ⚠️ Error RSS Revista EI: {e}")
 
-    return fallback_local
+    return list(noticias_map.values())
 
 def ejecutar_agente():
     inicializar_bd(reset=True)
@@ -288,14 +234,12 @@ def ejecutar_agente():
         if cursor.fetchone():
             continue
             
-        print(f"🧠 [{idx+1}/{len(noticias)}] Analizando ({item['fuente']}): {item['titulo'][:40]}...")
-        analisis = analizar_con_llm(item["titulo"], item["texto"], item["fuente"])
+        print(f"🧠 [{idx+1}/{len(noticias)}] Procesando ({item['fuente']}): {item['titulo'][:40]}...")
+        analisis = clasificar_inteligente(item["titulo"], item["texto"])
         
         if analisis and analisis.get("es_relevante", True):
             actores_list = analisis.get("actores_mencionados", [])
-            if not isinstance(actores_list, list):
-                actores_list = [str(actores_list)] if actores_list else []
-                
+            
             cursor.execute('''
                 INSERT INTO noticias 
                 (fuente, titulo, url, fecha_publicacion, categoria, resumen_ejecutivo, impacto_mercado, actores_mencionados, sentimiento)
@@ -314,8 +258,6 @@ def ejecutar_agente():
             conn.commit()
             noticias_guardadas += 1
             print(f"✅ Guardada -> Fuente: {item['fuente']} | Cat: {analisis.get('categoria')} | Impacto: {analisis.get('impacto_mercado')}")
-            
-        time.sleep(3.5)
 
     conn.close()
     print(f"\n🚀 Proceso finalizado. {noticias_guardadas} noticias agregadas a {DB_NAME}.")
