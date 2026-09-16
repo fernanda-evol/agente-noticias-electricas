@@ -6,6 +6,7 @@ import json
 import os
 import re
 import urllib3
+import urllib.parse
 from datetime import datetime, timezone
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -17,6 +18,42 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "es-ES,es;q=0.9,en;q=0.8"
 }
+
+# Proxies públicos de lectura (gratuitos). Se usan como respaldo cuando la
+# petición directa falla con 403/timeout — algo frecuente porque las IPs de
+# los runners de GitHub Actions son rangos de datacenter conocidos que varios
+# WAFs (Wordfence, Sucuri, Cloudflare) bloquean por defecto. El proxy hace la
+# petición desde su propia IP y nos devuelve el HTML/XML crudo tal cual.
+PROXIES_LECTURA = [
+    "https://api.allorigins.win/raw?url={url}",
+    "https://corsproxy.io/?url={url}",
+]
+
+
+def get_con_resiliencia(session, url, timeout=20, minimo_bytes=200):
+    """GET con reintento automático vía proxy si la petición directa falla.
+    Devuelve el objeto Response (directo o vía proxy) o None si todo falló."""
+    try:
+        resp = session.get(url, timeout=timeout, verify=False)
+        if resp.status_code == 200 and len(resp.content) >= minimo_bytes:
+            return resp
+        print(f"Directo a {url} -> HTTP {resp.status_code} ({len(resp.content)} bytes), probando proxy...")
+    except Exception as e:
+        print(f"Directo a {url} falló ({e}), probando proxy...")
+
+    for plantilla in PROXIES_LECTURA:
+        proxy_url = plantilla.format(url=urllib.parse.quote(url, safe=""))
+        nombre_proxy = urllib.parse.urlparse(proxy_url).netloc
+        try:
+            resp = session.get(proxy_url, timeout=timeout, verify=False)
+            if resp.status_code == 200 and len(resp.content) >= minimo_bytes:
+                print(f"Proxy {nombre_proxy} -> OK ({len(resp.content)} bytes)")
+                return resp
+            print(f"Proxy {nombre_proxy} -> HTTP {resp.status_code} ({len(resp.content)} bytes)")
+        except Exception as e:
+            print(f"Proxy {nombre_proxy} falló: {e}")
+
+    return None
 
 def inicializar_bd():
     conn = sqlite3.connect(DB_NAME)
@@ -85,32 +122,72 @@ def clasificar_localmente(titulo, texto):
         "sentimiento": "Neutro"
     }
 
-def obtener_texto_articulo(session, url, max_chars=4000):
-    """Descarga el cuerpo del artículo para enriquecer el texto de clasificación.
-    El RSS de ElectroMinería solo trae una oración de descripción, no el
-    cuerpo completo, así que esto complementa yendo a buscar la nota."""
+def obtener_texto_y_fecha_articulo(session, url, max_chars=4000):
+    """Descarga el cuerpo y la fecha real de publicación de un artículo.
+    Se usa tanto para enriquecer el HTML de categoría (que no trae el cuerpo
+    completo) como el RSS (que solo trae una oración de descripción)."""
+    fecha_default = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     try:
-        resp = session.get(url, timeout=15, verify=False)
-        if resp.status_code != 200:
-            return ""
+        resp = get_con_resiliencia(session, url, timeout=15)
+        if resp is None:
+            return "", fecha_default
         soup = BeautifulSoup(resp.text, "html.parser")
+
+        meta_fecha = soup.find("meta", property="article:published_time")
+        fecha = meta_fecha["content"] if meta_fecha and meta_fecha.get("content") else fecha_default
+
         contenedor = soup.select_one("div.entry-content") or soup.select_one("article")
-        if not contenedor:
-            return ""
-        for tag in contenedor.select("script, style"):
-            tag.decompose()
-        texto = re.sub(r'\s+', ' ', contenedor.get_text(separator=" ")).strip()
-        return texto[:max_chars]
+        texto = ""
+        if contenedor:
+            for tag in contenedor.select("script, style"):
+                tag.decompose()
+            texto = re.sub(r'\s+', ' ', contenedor.get_text(separator=" ")).strip()[:max_chars]
+        return texto, fecha
     except Exception:
-        return ""
+        return "", fecha_default
+
+
+CATEGORIA_ENERGIA_URL = "https://electromineria.cl/category/panorama-energetico/"
+
+
+def obtener_electromineria_categoria(session, limite=25):
+    """Extrae noticias directamente del listado de la categoría 'Panorama
+    Energético' — la sección específica de energía del sitio (a diferencia
+    del RSS general, que mezcla noticias de minería con las de energía).
+    Es la fuente principal: se confirmó que responde HTTP 200 con contenido
+    real y actualizado, sin depender del REST API filtrado."""
+    try:
+        resp = get_con_resiliencia(session, CATEGORIA_ENERGIA_URL, timeout=20)
+        if resp is None:
+            print("ElectroMinería categoría Panorama Energético -> falló directo y por proxy")
+            return []
+        soup = BeautifulSoup(resp.text, "html.parser")
+        vistos, noticias = set(), []
+        for h2 in soup.select("h2 a[href]"):
+            url = h2.get("href", "").strip()
+            titulo = h2.get_text(strip=True)
+            if not (url.startswith("https://electromineria.cl/") and titulo):
+                continue
+            if "/category/" in url or "/tag/" in url or url in vistos:
+                continue
+            vistos.add(url)
+            texto, fecha_pub = obtener_texto_y_fecha_articulo(session, url)
+            noticias.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": texto, "fecha": fecha_pub})
+            if len(noticias) >= limite:
+                break
+        print(f"ElectroMinería categoría Panorama Energético -> {len(noticias)} noticias")
+        return noticias
+    except Exception as e:
+        print(f"Error scraping categoría ElectroMinería: {e}")
+        return []
 
 
 def obtener_electromineria_via_html(session, limite=20):
-    """Último recurso si el RSS también falla: scraping directo del home."""
+    """Último recurso si la categoría y el RSS también fallan: scraping del home."""
     try:
-        resp = session.get("https://electromineria.cl/", timeout=20, verify=False)
-        print(f"ElectroMinería HTML (fallback) -> HTTP {resp.status_code}")
-        if resp.status_code != 200:
+        resp = get_con_resiliencia(session, "https://electromineria.cl/", timeout=20)
+        if resp is None:
+            print("ElectroMinería HTML (fallback) -> falló directo y por proxy")
             return []
         soup = BeautifulSoup(resp.text, "html.parser")
         vistos, noticias = set(), []
@@ -120,8 +197,8 @@ def obtener_electromineria_via_html(session, limite=20):
             if not (url.startswith("https://electromineria.cl/") and titulo) or url in vistos:
                 continue
             vistos.add(url)
-            texto = obtener_texto_articulo(session, url)
-            noticias.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": texto, "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')})
+            texto, fecha_pub = obtener_texto_y_fecha_articulo(session, url)
+            noticias.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": texto, "fecha": fecha_pub})
             if len(noticias) >= limite:
                 break
         return noticias
@@ -134,9 +211,11 @@ def obtener_noticias():
     noticias = []
 
     # 1. Revista EI (API WP)
-    try:
-        resp = requests.get("https://www.revistaei.cl/wp-json/wp/v2/posts?per_page=30", headers=HEADERS, timeout=15, verify=False)
-        if resp.status_code == 200:
+    session_ei = requests.Session()
+    session_ei.headers.update(HEADERS)
+    resp = get_con_resiliencia(session_ei, "https://www.revistaei.cl/wp-json/wp/v2/posts?per_page=30", timeout=15)
+    if resp is not None:
+        try:
             for post in resp.json():
                 titulo = limpiar_html(post.get("title", {}).get("rendered", ""))
                 url = post.get("link", "").strip()
@@ -144,57 +223,57 @@ def obtener_noticias():
                 fecha = post.get("date") or datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
                 if titulo and url:
                     noticias.append({"fuente": "Revista EI", "titulo": titulo, "url": url, "texto": texto, "fecha": fecha})
-        else:
-            print(f"Revista EI -> HTTP {resp.status_code}")
-    except Exception as e:
-        print(f"Error Revista EI: {e}")
+        except Exception as e:
+            print(f"Error parseando Revista EI: {e}")
+    else:
+        print("Revista EI -> falló directo y por proxy")
 
     # 2. ElectroMinería — el REST API de este sitio (/wp-json/wp/v2/posts) está
     # filtrado por un plugin de seguridad y siempre devuelve [] con HTTP 200,
-    # así que no se usa como fuente. El RSS es la vía confiable; se complementa
-    # yendo a buscar el cuerpo de cada artículo porque el feed solo trae una
-    # oración de descripción.
+    # así que no se usa como fuente. La fuente principal es el listado HTML de
+    # la categoría "Panorama Energético" (la sección de energía del sitio),
+    # con el RSS general y el home como respaldos si esa página cambia.
     session_em = requests.Session()
     session_em.headers.update({
         **HEADERS,
         "Referer": "https://electromineria.cl/",
-        "Accept": "application/rss+xml, application/xml;q=0.9, text/html;q=0.8, */*;q=0.7",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     })
     try:
         # "Calentar" la sesión visitando el home primero: algunos WAFs exigen
-        # una cookie de sesión antes de servir el feed a clientes no-navegador.
+        # una cookie de sesión antes de servir contenido a clientes no-navegador.
         session_em.get("https://electromineria.cl/", timeout=15, verify=False)
     except Exception as e:
         print(f"Aviso: no se pudo precalentar sesión ElectroMinería: {e}")
 
-    entradas_rss = 0
-    try:
-        resp_rss = session_em.get("https://electromineria.cl/feed/", timeout=20, verify=False)
-        print(f"ElectroMinería RSS -> HTTP {resp_rss.status_code}, {len(resp_rss.content)} bytes")
-        if resp_rss.status_code == 200:
-            feed = feedparser.parse(resp_rss.content)
-            entradas_rss = len(feed.entries)
-            print(f"ElectroMinería RSS -> {entradas_rss} entradas parseadas")
-            for entry in feed.entries:
-                titulo = getattr(entry, 'title', '').strip()
-                url = getattr(entry, 'link', '').strip()
-                if not (titulo and url):
-                    continue
-                texto = obtener_texto_articulo(session_em, url)
-                if not texto:
-                    content_raw = entry.content[0].value if "content" in entry and len(entry.content) > 0 else getattr(entry, 'summary', '')
-                    texto = limpiar_html(content_raw)
-                fecha_pub = entry.get("published", datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'))
-                noticias.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": texto, "fecha": fecha_pub})
+    noticias_em = obtener_electromineria_categoria(session_em)
+
+    if not noticias_em:
+        resp_rss = get_con_resiliencia(session_em, "https://electromineria.cl/feed/", timeout=20)
+        if resp_rss is not None:
+            try:
+                feed = feedparser.parse(resp_rss.content)
+                print(f"ElectroMinería RSS (respaldo) -> {len(feed.entries)} entradas parseadas")
+                for entry in feed.entries:
+                    titulo = getattr(entry, 'title', '').strip()
+                    url = getattr(entry, 'link', '').strip()
+                    if not (titulo and url):
+                        continue
+                    texto, fecha_pub = obtener_texto_y_fecha_articulo(session_em, url)
+                    if not texto:
+                        content_raw = entry.content[0].value if "content" in entry and len(entry.content) > 0 else getattr(entry, 'summary', '')
+                        texto = limpiar_html(content_raw)
+                    noticias_em.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": texto, "fecha": fecha_pub})
+            except Exception as e:
+                print(f"Error parseando RSS ElectroMinería: {e}")
         else:
-            print(f"ElectroMinería RSS bloqueado o con error: HTTP {resp_rss.status_code}")
-    except Exception as e:
-        print(f"Error RSS ElectroMinería: {e}")
+            print("ElectroMinería RSS (respaldo) -> falló directo y por proxy")
 
-    # Fallback final si el RSS no entregó nada (bloqueo puntual, timeout, etc.)
-    if entradas_rss == 0:
-        noticias.extend(obtener_electromineria_via_html(session_em))
+    # Último recurso: scraping del home si categoría y RSS fallaron.
+    if not noticias_em:
+        noticias_em = obtener_electromineria_via_html(session_em)
 
+    noticias.extend(noticias_em)
     return noticias
 
 def ejecutar_agente():
