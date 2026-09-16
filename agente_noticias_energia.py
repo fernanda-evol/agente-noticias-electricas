@@ -5,6 +5,7 @@ import sqlite3
 import json
 import os
 import re
+import calendar
 from datetime import datetime, timedelta, timezone
 import time
 from google import genai
@@ -15,6 +16,7 @@ FUENTES = [
 ]
 
 DB_NAME = "noticias_energia.db"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 def inicializar_bd():
     conn = sqlite3.connect(DB_NAME)
@@ -50,12 +52,13 @@ def obtener_noticias_recientes_7dias():
     
     for fuente in FUENTES:
         print(f"📡 Leyendo feed de {fuente['nombre']}...")
-        feed = feedparser.parse(fuente["url_rss"])
+        feed = feedparser.parse(fuente["url_rss"], agent=USER_AGENT)
+        print(f"   Entradas encontradas: {len(feed.entries)}")
         
         for entry in feed.entries:
             if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                fecha_struct = entry.published_parsed
-                fecha_noticia = datetime.fromtimestamp(time.mktime(fecha_struct), tz=timezone.utc)
+                timestamp = calendar.timegm(entry.published_parsed)
+                fecha_noticia = datetime.fromtimestamp(timestamp, tz=timezone.utc)
             else:
                 fecha_noticia = datetime.now(timezone.utc)
 
@@ -64,7 +67,13 @@ def obtener_noticias_recientes_7dias():
                 
             url = entry.link
             titulo = entry.title
-            contenido_raw = entry.get("content", [{"value": entry.get("summary", "")}])[0]["value"]
+            
+            contenido_raw = ""
+            if "content" in entry and len(entry.content) > 0:
+                contenido_raw = entry.content[0].value
+            elif "summary" in entry:
+                contenido_raw = entry.summary
+                
             contenido_limpio = limpiar_html(contenido_raw)
             
             noticias.append({
@@ -104,22 +113,24 @@ def analizar_con_llm(titulo, texto, fuente):
     
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-2.0-flash",
             contents=prompt,
             config={"response_mime_type": "application/json"}
         )
         return json.loads(response.text)
     except Exception as e:
-        print(f"Error procesando con LLM: {e}")
+        print(f"❌ Error procesando con LLM para '{titulo[:30]}': {e}")
         return None
 
 def ejecutar_agente():
     inicializar_bd()
     noticias = obtener_noticias_recientes_7dias()
+    print(f"📰 Total de noticias recuperadas (últimos 7 días): {len(noticias)}")
     
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
+    noticias_guardadas = 0
     for item in noticias:
         cursor.execute("SELECT id FROM noticias WHERE url = ?", (item["url"],))
         if cursor.fetchone():
@@ -146,10 +157,11 @@ def ejecutar_agente():
                 analisis.get("sentimiento", "Neutro")
             ))
             conn.commit()
+            noticias_guardadas += 1
             print(f"✅ Guardada correctamente.")
             
     conn.close()
-    print("\n🚀 Pipeline completado con éxito.")
+    print(f"\n🚀 Pipeline completado. Se guardaron {noticias_guardadas} noticias nuevas.")
 
 if __name__ == "__main__":
     ejecutar_agente()
