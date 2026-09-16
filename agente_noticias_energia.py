@@ -5,10 +5,13 @@ import sqlite3
 import json
 import os
 import re
+import random
 import urllib3
 import urllib.parse
 import time
 from datetime import datetime, timezone
+from google import genai
+from google.genai import types
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -19,6 +22,26 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "es-ES,es;q=0.9,en;q=0.8"
 }
+
+# --- Configuración de Gemini ---
+# gemini-2.5-flash-lite: es el modelo con cuota gratuita más generosa (del
+# orden de 1.000-1.500 solicitudes/día) y de sobra para clasificar/resumir
+# noticias cortas. Con el volumen diario de este agente (decenas de
+# noticias) el riesgo real de tope de cuota es bajo, pero igual se deja un
+# límite de llamadas por corrida y una caída a reglas locales por si acaso
+# (falla de red, cuota agotada, respuesta inválida).
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+MAX_GEMINI_LLAMADAS_POR_CORRIDA = int(os.getenv("MAX_GEMINI_CALLS_PER_RUN", "60"))
+GEMINI_ESPERA_SEGUNDOS = float(os.getenv("GEMINI_SLEEP_SECONDS", "3"))
+
+CATEGORIAS_VALIDAS = [
+    "Generación/ERNC", "Almacenamiento (BESS)", "Transmisión",
+    "Regulación/Normativa", "PMGD/Distribución",
+    "Hidrógeno Verde/Descarbonización", "Mercado Mayorista/Precios",
+]
+IMPACTOS_VALIDOS = ["Alto", "Medio", "Bajo"]
+SENTIMIENTOS_VALIDOS = ["Positivo", "Negativo", "Neutro"]
 
 # Proxies públicos de lectura (gratuitos). Se usan como respaldo cuando la
 # petición directa falla con 403/timeout — algo frecuente porque las IPs de
@@ -134,6 +157,92 @@ def clasificar_localmente(titulo, texto):
         "actores_mencionados": actores,
         "sentimiento": "Neutro"
     }
+
+
+class CuotaGeminiAgotada(Exception):
+    """Señal interna: Gemini devolvió 429 de forma persistente en esta
+    corrida. El llamador debe dejar de intentar con Gemini y usar reglas
+    locales para el resto de las noticias, sin seguir insistiendo."""
+    pass
+
+
+def _esquema_analisis_gemini():
+    return {
+        "type": "object",
+        "properties": {
+            "categoria": {"type": "string", "enum": CATEGORIAS_VALIDAS},
+            "resumen_ejecutivo": {"type": "string"},
+            "impacto_mercado": {"type": "string", "enum": IMPACTOS_VALIDOS},
+            "actores_mencionados": {"type": "array", "items": {"type": "string"}},
+            "sentimiento": {"type": "string", "enum": SENTIMIENTOS_VALIDOS},
+        },
+        "required": ["categoria", "resumen_ejecutivo", "impacto_mercado", "actores_mencionados", "sentimiento"],
+    }
+
+
+def clasificar_con_gemini(client, titulo, texto, contador_llamadas):
+    """Analiza una noticia con Gemini (categoría, resumen, impacto, actores,
+    sentimiento) usando salida JSON estructurada. Devuelve None si la
+    respuesta no se pudo usar (el llamador debe caer a clasificar_localmente
+    en ese caso). Lanza CuotaGeminiAgotada si detecta un 429 persistente."""
+    if contador_llamadas[0] >= MAX_GEMINI_LLAMADAS_POR_CORRIDA:
+        raise CuotaGeminiAgotada("Presupuesto de llamadas a Gemini agotado para esta corrida")
+
+    prompt = (
+        "Eres un analista del mercado eléctrico chileno. Analiza la siguiente "
+        "noticia y responde solo con el JSON solicitado, sin texto adicional ni markdown.\n\n"
+        f"Categorías válidas (elige exactamente una): {', '.join(CATEGORIAS_VALIDAS)}\n\n"
+        f"Título: {titulo}\n"
+        f"Contenido: {texto[:3000]}\n\n"
+        "resumen_ejecutivo: máximo 40 palabras, en español, con la información "
+        "más relevante para un analista comercial del mercado eléctrico.\n"
+        "actores_mencionados: nombres de empresas u organismos mencionados "
+        "explícitamente (lista vacía si no hay ninguno claro)."
+    )
+
+    max_reintentos = 3
+    for intento in range(1, max_reintentos + 1):
+        contador_llamadas[0] += 1
+        try:
+            resp = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=_esquema_analisis_gemini(),
+                    temperature=0.2,
+                ),
+            )
+        except Exception as e:
+            mensaje = str(e)
+            if "429" in mensaje or "RESOURCE_EXHAUSTED" in mensaje.upper():
+                print(f"Gemini: 429 (intento {intento}/{max_reintentos})")
+                if intento == max_reintentos:
+                    raise CuotaGeminiAgotada("Gemini devolvió 429 de forma persistente")
+                time.sleep((2 ** intento) + random.uniform(0, 1))
+                continue
+            print(f"Gemini: error de API ({e}), se usan reglas locales para esta noticia")
+            return None
+
+        try:
+            resultado = json.loads(resp.text)
+        except (ValueError, AttributeError) as e:
+            print(f"Gemini: respuesta no parseable ({e}), se usan reglas locales para esta noticia")
+            return None
+
+        categoria = resultado.get("categoria")
+        impacto = resultado.get("impacto_mercado")
+        sentimiento = resultado.get("sentimiento")
+        actores = resultado.get("actores_mencionados")
+        return {
+            "categoria": categoria if categoria in CATEGORIAS_VALIDAS else "Generación/ERNC",
+            "resumen_ejecutivo": (resultado.get("resumen_ejecutivo") or titulo)[:400],
+            "impacto_mercado": impacto if impacto in IMPACTOS_VALIDOS else "Medio",
+            "actores_mencionados": actores if isinstance(actores, list) else [],
+            "sentimiento": sentimiento if sentimiento in SENTIMIENTOS_VALIDOS else "Neutro",
+        }
+
+    return None
 
 def _contenedor_propio_del_post(h2):
     """Sube por los ancestros de un <h2> hasta encontrar el contenedor que
@@ -327,18 +436,45 @@ def ejecutar_agente():
     inicializar_bd()
     noticias = obtener_noticias()
     print(f"Total de noticias obtenidas: {len(noticias)}")
-    
+
+    cliente_gemini = None
+    cuota_agotada = not bool(GEMINI_API_KEY)
+    contador_llamadas = [0]
+    if GEMINI_API_KEY:
+        try:
+            cliente_gemini = genai.Client(api_key=GEMINI_API_KEY)
+        except Exception as e:
+            print(f"No se pudo inicializar el cliente de Gemini ({e}); se usarán reglas locales para todo.")
+            cuota_agotada = True
+    else:
+        print("GEMINI_API_KEY no configurada; se usarán reglas locales para todo.")
+
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
     guardadas = 0
+    origen_gemini = 0
+    origen_reglas = 0
     for item in noticias:
         cursor.execute("SELECT id FROM noticias WHERE url = ?", (item["url"],))
         if cursor.fetchone():
             continue
-            
-        analisis = clasificar_localmente(item["titulo"], item["texto"])
-        
+
+        analisis = None
+        if not cuota_agotada:
+            try:
+                analisis = clasificar_con_gemini(cliente_gemini, item["titulo"], item["texto"], contador_llamadas)
+                if analisis is not None:
+                    origen_gemini += 1
+                    time.sleep(GEMINI_ESPERA_SEGUNDOS)
+            except CuotaGeminiAgotada as e:
+                print(f"{e} — de acá en adelante se usan reglas locales para esta corrida.")
+                cuota_agotada = True
+
+        if analisis is None:
+            analisis = clasificar_localmente(item["titulo"], item["texto"])
+            origen_reglas += 1
+
         cursor.execute('''
             INSERT OR IGNORE INTO noticias 
             (fuente, titulo, url, fecha_publicacion, categoria, resumen_ejecutivo, impacto_mercado, actores_mencionados, sentimiento)
@@ -358,7 +494,8 @@ def ejecutar_agente():
         guardadas += 1
 
     conn.close()
-    print(f"Proceso finalizado. {guardadas} nuevas noticias guardadas.")
+    print(f"Proceso finalizado. {guardadas} nuevas noticias guardadas "
+          f"({origen_gemini} con Gemini, {origen_reglas} con reglas locales).")
 
 if __name__ == "__main__":
     ejecutar_agente()
