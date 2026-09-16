@@ -1,4 +1,5 @@
 import requests
+import feedparser
 from bs4 import BeautifulSoup
 import sqlite3
 import json
@@ -9,7 +10,7 @@ from google import genai
 
 FUENTES = [
     {"nombre": "Revista EI", "url_rss": "https://www.revistaei.cl/feed/"},
-    {"nombre": "ElectroMinería", "url_rss": "https://electromineria.cl/feed/"}
+    {"nombre": "ElectroMinería", "url_rss": "https://www.electromineria.cl/feed/"}
 ]
 
 DB_NAME = "noticias_energia.db"
@@ -49,16 +50,54 @@ def limpiar_html(html_content):
     texto = soup.get_text(separator=" ")
     return re.sub(r'\s+', ' ', texto).strip()
 
-def obtener_noticias_rss2json(url_rss):
+def obtener_items_feed(url_rss):
+    """
+    Intenta obtener las noticias vía API rss2json. Si falla, hace petición directa con feedparser.
+    """
     api_url = f"https://api.rss2json.com/v1/api.json?rss_url={requests.utils.quote(url_rss)}"
     try:
         resp = requests.get(api_url, headers=HEADERS, timeout=15)
         if resp.status_code == 200:
             data = resp.json()
-            if data.get("status") == "ok" and "items" in data:
-                return data["items"]
+            if data.get("status") == "ok" and "items" in data and len(data["items"]) > 0:
+                print("   ✔ Recuperado vía API rss2json")
+                return [
+                    {
+                        "title": item.get("title", "").strip(),
+                        "link": item.get("link", "").strip(),
+                        "pubDate": item.get("pubDate", ""),
+                        "content": item.get("content") or item.get("description") or ""
+                    }
+                    for item in data["items"]
+                ]
     except Exception as e:
-        print(f"   ⚠️ Error con API rss2json: {e}")
+        print(f"   ⚠️ rss2json falló: {e}")
+
+    # Método de respaldo directo
+    try:
+        resp_direct = requests.get(url_rss, headers=HEADERS, timeout=15, allow_redirects=True)
+        if resp_direct.status_code == 200:
+            feed = feedparser.parse(resp_direct.content)
+            print(f"   ✔ Recuperado vía feedparser directo ({len(feed.entries)} entradas)")
+            items = []
+            for entry in feed.entries:
+                pub_date = getattr(entry, 'published', '') or getattr(entry, 'updated', '')
+                content = ""
+                if "content" in entry and len(entry.content) > 0:
+                    content = entry.content[0].value
+                elif "summary" in entry:
+                    content = entry.summary
+                    
+                items.append({
+                    "title": entry.get("title", "").strip(),
+                    "link": entry.get("link", "").strip(),
+                    "pubDate": pub_date,
+                    "content": content
+                })
+            return items
+    except Exception as e:
+        print(f"   ❌ Error directo: {e}")
+
     return []
 
 def obtener_noticias_recientes():
@@ -66,25 +105,30 @@ def obtener_noticias_recientes():
     hace_30_dias = datetime.now(timezone.utc) - timedelta(days=30)
     
     for fuente in FUENTES:
-        print(f"📡 Recuperando noticias de {fuente['nombre']}...")
-        items = obtener_noticias_rss2json(fuente["url_rss"])
+        print(f"📡 Recuperando noticias de {fuente['nombre']} ({fuente['url_rss']})...")
+        items = obtener_items_feed(fuente["url_rss"])
         print(f"   Artículos encontrados: {len(items)}")
         
         for item in items:
-            titulo = item.get("title", "").strip()
-            url = item.get("link", "").strip()
+            titulo = item.get("title", "")
+            url = item.get("link", "")
             pub_date_str = item.get("pubDate", "")
             
-            try:
-                fecha_dt = datetime.strptime(pub_date_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-            except:
-                fecha_dt = datetime.now(timezone.utc)
+            fecha_dt = datetime.now(timezone.utc)
+            if pub_date_str:
+                for fmt in ["%Y-%m-%d %H:%M:%S", "%a, %d %b %Y %H:%M:%S %z", "%a, %d %b %Y %H:%M:%S GMT"]:
+                    try:
+                        fecha_dt = datetime.strptime(pub_date_str, fmt)
+                        if fecha_dt.tzinfo is None:
+                            fecha_dt = fecha_dt.replace(tzinfo=timezone.utc)
+                        break
+                    except:
+                        pass
                 
             if fecha_dt < hace_30_dias:
                 continue
                 
-            raw_content = item.get("content") or item.get("description") or ""
-            texto_limpio = limpiar_html(raw_content)
+            texto_limpio = limpiar_html(item.get("content", ""))
             
             if titulo and url:
                 noticias.append({
