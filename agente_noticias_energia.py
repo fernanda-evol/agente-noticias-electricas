@@ -12,20 +12,22 @@ from google import genai
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-FUENTES_API = [
+# Fuentes con feeds RSS directos de sus secciones principales
+FUENTES = [
     {
         "nombre": "Revista EI", 
-        "url_api": "https://www.revistaei.cl/wp-json/wp/v2/posts?per_page=50",
         "url_rss": "https://www.revistaei.cl/feed/"
     },
     {
         "nombre": "ElectroMinería", 
-        "url_api": "https://electromineria.cl/wp-json/wp/v2/posts?per_page=50",
+        "url_rss": "https://electromineria.cl/category/panorama-energetico/feed/"
+    },
+    {
+        "nombre": "ElectroMinería", 
         "url_rss": "https://electromineria.cl/feed/"
     }
 ]
 
-URL_ELECTROMINERIA_ENERGIA = "https://electromineria.cl/category/panorama-energetico/"
 DB_NAME = "noticias_energia.db"
 
 HEADERS = {
@@ -43,6 +45,10 @@ PALABRAS_EXCLUIR_EMPLEO = [
 def inicializar_bd():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
+    
+    # Borrado explícito inicial para limpiar la BD genérica previa
+    cursor.execute("DROP TABLE IF EXISTS noticias")
+    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS noticias (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,9 +64,17 @@ def inicializar_bd():
             procesado_el TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    cursor.execute("DELETE FROM noticias WHERE LOWER(titulo) LIKE '%ofertas de empleo%' OR LOWER(titulo) LIKE '%vacantes%'")
     conn.commit()
     conn.close()
+
+def normalizar_url(url):
+    if not url:
+        return ""
+    u = url.strip().rstrip("/")
+    u = u.replace("https://www.electromineria.cl", "https://electromineria.cl")
+    u = u.replace("http://www.electromineria.cl", "https://electromineria.cl")
+    u = u.replace("http://electromineria.cl", "https://electromineria.cl")
+    return u
 
 def limpiar_html(html_content):
     if not html_content:
@@ -75,85 +89,48 @@ def es_oferta_empleo(titulo, texto):
     contenido = f"{titulo} {texto}".lower()
     return any(palabra in contenido for palabra in PALABRAS_EXCLUIR_EMPLEO)
 
-def extraer_panorama_energetico_electromineria():
-    noticias = []
-    try:
-        print(f"🕸️ Extrayendo directamente desde categoría: {URL_ELECTROMINERIA_ENERGIA}")
-        resp = requests.get(URL_ELECTROMINERIA_ENERGIA, headers=HEADERS, timeout=15, verify=False)
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.content, "html.parser")
-            articulos = soup.find_all(["article", "div"], class_=re.compile(r'post|entry|item|article'))
-            
-            for art in articulos:
-                a_tag = art.find("a", href=True)
-                h_tag = art.find(["h1", "h2", "h3", "h4"]) or a_tag
-                
-                if a_tag and h_tag:
-                    url = a_tag["href"].strip()
-                    titulo = limpiar_html(h_tag.get_text())
-                    
-                    if titulo and url and "electromineria.cl" in url and not es_oferta_empleo(titulo, ""):
-                        noticias.append({
-                            "fuente": "ElectroMinería",
-                            "titulo": titulo,
-                            "url": url,
-                            "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
-                            "texto": titulo
-                        })
-            print(f"   [Web Scraper] {len(noticias)} artículos encontrados.")
-    except Exception as e:
-        print(f"⚠️ Error Scraper ElectroMinería: {e}")
-    return noticias
-
 def obtener_noticias():
     noticias_map = {}
     hace_30_dias = datetime.now(timezone.utc) - timedelta(days=30)
     
-    # 1. Scraper Panorama Energético
-    for item in extraer_panorama_energetico_electromineria():
-        noticias_map[item["url"]] = item
-
-    # 2. APIs REST y RSS
-    for fuente in FUENTES_API:
-        print(f"📡 Consultando API/RSS: {fuente['nombre']}...")
+    for fuente in FUENTES:
+        print(f"📡 Consultando RSS: {fuente['nombre']} ({fuente['url_rss']})...")
         try:
-            resp = requests.get(fuente["url_api"], headers=HEADERS, timeout=15, verify=False)
-            if resp.status_code == 200:
-                posts = resp.json()
-                if isinstance(posts, list):
-                    for post in posts:
-                        titulo = limpiar_html(post.get("title", {}).get("rendered", ""))
-                        url_oficial = post.get("link", "").strip()
-                        
-                        if not url_oficial or es_oferta_empleo(titulo, ""):
-                            continue
+            resp_rss = requests.get(fuente["url_rss"], headers=HEADERS, timeout=15, verify=False)
+            if resp_rss.status_code == 200:
+                feed = feedparser.parse(resp_rss.content)
+                print(f"   [RSS] {len(feed.entries)} artículos detectados.")
+                for entry in feed.entries:
+                    titulo = getattr(entry, 'title', '').strip()
+                    url_oficial = normalizar_url(getattr(entry, 'link', ''))
 
-                        date_str = post.get("date_gmt", "") or post.get("date", "")
+                    if not url_oficial or es_oferta_empleo(titulo, ""):
+                        continue
+
+                    if url_oficial not in noticias_map:
+                        parsed_time = getattr(entry, 'published_parsed', None)
                         fecha_dt = datetime.now(timezone.utc)
-                        if date_str:
-                            date_clean = re.sub(r'\.\d+', '', date_str.replace("Z", ""))
-                            for fmt in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"]:
-                                try:
-                                    fecha_dt = datetime.strptime(date_clean, fmt).replace(tzinfo=timezone.utc)
-                                    break
-                                except ValueError:
-                                    pass
+                        if parsed_time:
+                            fecha_dt = datetime.fromtimestamp(calendar.timegm(parsed_time), tz=timezone.utc)
 
                         if fecha_dt < hace_30_dias:
                             continue
 
-                        texto_limpio = limpiar_html(post.get("content", {}).get("rendered", ""))
-                        
-                        if titulo and url_oficial not in noticias_map:
-                            noticias_map[url_oficial] = {
-                                "fuente": fuente["nombre"],
-                                "titulo": titulo,
-                                "url": url_oficial,
-                                "fecha": fecha_dt.strftime('%Y-%m-%d %H:%M:%S'),
-                                "texto": texto_limpio
-                            }
+                        content_raw = ""
+                        if "content" in entry and len(entry.content) > 0:
+                            content_raw = entry.content[0].value
+                        elif "summary" in entry:
+                            content_raw = entry.summary
+
+                        noticias_map[url_oficial] = {
+                            "fuente": fuente["nombre"],
+                            "titulo": titulo,
+                            "url": url_oficial,
+                            "fecha": fecha_dt.strftime('%Y-%m-%d %H:%M:%S'),
+                            "texto": limpiar_html(content_raw)
+                        }
         except Exception as e:
-            print(f"   ⚠️ Error API WP ({fuente['nombre']}): {e}")
+            print(f"   ⚠️ Error en RSS para {fuente['nombre']}: {e}")
 
     return list(noticias_map.values())
 
@@ -163,34 +140,35 @@ def analizar_con_llm(titulo, texto, fuente):
 
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
+        print("❌ GEMINI_API_KEY no configurada.")
         return None
 
     client = genai.Client(api_key=api_key)
     
     prompt = f"""
     Eres un analista experto del mercado eléctrico chileno.
-    Analiza la noticia de {fuente}:
+    Analiza la noticia publicada en {fuente}:
     
     Título: {titulo}
     Texto: {texto[:2500]}
     
-    SI ES OFERTA DE EMPLEO, RESPONDE: {{"es_relevante": false}}
+    SI ES OFERTA DE EMPLEO O PUBLICIDAD, RESPONDE STRICTAMENTE: {{"es_relevante": false}}
 
-    CLASIFICACIÓN ESTRICTA DE "impacto_mercado":
-    - "Alto": Leyes, reglamentos, resoluciones CNE/Coordinador, proyectos BESS o Transmisión >US$50M o >100MW, vertimientos masivos o alzas tarifarias.
-    - "Medio": Posicionamiento de gremios (Acenor, Generadoras), proyectos PMGD, hitos de construcción/ingreso ambiental, contratos PPA.
-    - "Bajo": Nombramientos de ejecutivos, eventos, ferias, actividades RSE.
+    CLASIFICACIÓN OBLIGATORIA DE "impacto_mercado":
+    - "Alto": Proyectos >US$ 50M o >100 MW (BESS, Transmisión, ERNC), decretos/resoluciones de CNE, Coordinador Eléctrico o Ministerio, alzas tarifarias, vertimientos masivos o insolvencias.
+    - "Medio": Posicionamiento/cuestionamientos de gremios (Acenor, Generadoras, ACERA), proyectos PMGD, hitos de obra, contratos PPA, aprobaciones ambientales.
+    - "Bajo": Nombramientos de ejecutivos, eventos, ferias, premiaciones, RSE.
 
-    Responde ÚNICAMENTE en JSON estricto:
+    Responde ÚNICAMENTE en JSON estricto con la siguiente estructura:
     1. "es_relevante": true
     2. "categoria": Selección estricta entre ["Transmisión", "Almacenamiento (BESS)", "Generación/ERNC", "Regulación/Normativa", "Mercado Mayorista/Precios", "PMGD/Distribución", "Hidrógeno Verde/Descarbonización"].
-    3. "resumen_ejecutivo": Párrafo técnico de 2-3 oraciones sintetizando el impacto operativo/regulatorio.
-    4. "impacto_mercado": "Alto", "Medio" o "Bajo".
-    5. "actores_mencionados": Lista con nombres exactos de empresas u organismos citados (ej. ["Acenor", "CNE", "Coordinador Eléctrico", "Enel"]).
-    6. "sentimiento": "Positivo", "Neutro", o "Riesgo/Negativo".
+    3. "resumen_ejecutivo": Un párrafo técnico de 2-3 oraciones sintetizando el impacto real.
+    4. "impacto_mercado": Evalúa rigurosamente si es "Alto", "Medio" o "Bajo".
+    5. "actores_mencionados": Lista de cadenas con los nombres exactos de empresas u organismos citados (ej. ["Acenor", "CNE", "Coordinador Eléctrico"]).
+    6. "sentimiento": Elige entre ["Positivo", "Neutro", "Riesgo/Negativo"].
     """
 
-    for model_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+    for model_name in ["gemini-2.0-flash", "gemini-1.5-flash"]:
         try:
             response = client.models.generate_content(
                 model=model_name,
@@ -203,7 +181,8 @@ def analizar_con_llm(titulo, texto, fuente):
                 res_json = json.loads(cleaned)
                 if isinstance(res_json, dict) and "categoria" in res_json:
                     return res_json
-        except Exception:
+        except Exception as e:
+            print(f"⚠️ Error modelo {model_name}: {e}")
             continue
 
     return None
@@ -211,49 +190,21 @@ def analizar_con_llm(titulo, texto, fuente):
 def ejecutar_agente():
     inicializar_bd()
     
+    noticias = obtener_noticias()
+    print(f"\n📰 Total de noticias únicas recuperadas para procesar: {len(noticias)}")
+    
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    # FASE 1: RE-ANALIZAR REGISTROS GENÉRICOS ANTIGUOS
-    cursor.execute("SELECT id, fuente, titulo, url, resumen_ejecutivo FROM noticias WHERE actores_mencionados = '[]' OR actores_mencionados = '\"[]\"'")
-    filas_a_reparar = cursor.fetchall()
-    
-    if filas_a_reparar:
-        print(f"🛠️ Re-analizando {len(filas_a_reparar)} registros genéricos...")
-        for row_id, fuente, titulo, url, resumen_db in filas_a_reparar:
-            analisis = analizar_con_llm(titulo, resumen_db, fuente)
-            if analisis and analisis.get("es_relevante", True):
-                actores_list = analisis.get("actores_mencionados", [])
-                if not isinstance(actores_list, list):
-                    actores_list = [str(actores_list)] if actores_list else []
-                    
-                cursor.execute('''
-                    UPDATE noticias 
-                    SET categoria = ?, resumen_ejecutivo = ?, impacto_mercado = ?, actores_mencionados = ?, sentimiento = ?
-                    WHERE id = ?
-                ''', (
-                    analisis.get("categoria", "Regulación/Normativa"),
-                    analisis.get("resumen_ejecutivo", titulo),
-                    analisis.get("impacto_mercado", "Medio"),
-                    json.dumps(actores_list, ensure_ascii=False),
-                    analisis.get("sentimiento", "Neutro"),
-                    row_id
-                ))
-                conn.commit()
-
-    # FASE 2: PROCESAR PUBLICACIONES NUEVAS
-    noticias = obtener_noticias()
-    print(f"\n📰 Total de noticias únicas recuperadas: {len(noticias)}")
-
     noticias_guardadas = 0
     for item in noticias:
-        url_oficial = item["url"]
+        url_oficial = normalizar_url(item["url"])
         
         cursor.execute("SELECT id FROM noticias WHERE url = ?", (url_oficial,))
         if cursor.fetchone():
             continue
             
-        print(f"🧠 Analizando noticia nueva: {item['titulo'][:50]}...")
+        print(f"🧠 Analizando noticia de {item['fuente']}: {item['titulo'][:50]}...")
         analisis = analizar_con_llm(item["titulo"], item["texto"], item["fuente"])
         
         if analisis and analisis.get("es_relevante", True):
@@ -278,6 +229,7 @@ def ejecutar_agente():
             ))
             conn.commit()
             noticias_guardadas += 1
+            print(f"✅ Noticia agregada.")
             
     conn.close()
     print(f"\n🚀 Proceso finalizado. {noticias_guardadas} noticias agregadas a {DB_NAME}.")
