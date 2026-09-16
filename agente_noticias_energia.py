@@ -5,6 +5,7 @@ import sqlite3
 import json
 import os
 import re
+import calendar
 from datetime import datetime, timedelta, timezone
 from google import genai
 
@@ -35,11 +36,10 @@ PALABRAS_EXCLUIR_EMPLEO = [
     "bolsa de trabajo", "oportunidad laboral"
 ]
 
-def inicializar_bd(reset=True):
+def inicializar_bd(reset=False):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    # Reiniciar la tabla si reset es True para eliminar URLs corruptas previas
     if reset:
         cursor.execute("DROP TABLE IF EXISTS noticias")
         
@@ -58,6 +58,8 @@ def inicializar_bd(reset=True):
             procesado_el TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Limpieza preventiva de ofertas de empleo existentes
+    cursor.execute("DELETE FROM noticias WHERE LOWER(titulo) LIKE '%ofertas de empleo%' OR LOWER(titulo) LIKE '%vacantes%'")
     conn.commit()
     conn.close()
 
@@ -81,7 +83,7 @@ def obtener_noticias():
     for fuente in FUENTES:
         print(f"📡 Consultando fuente: {fuente['nombre']}...")
         
-        # 1. API WordPress REST
+        # 1. Consulta vía API WordPress REST
         try:
             resp = requests.get(fuente["url_api"], headers=HEADERS, timeout=15)
             if resp.status_code == 200:
@@ -122,7 +124,7 @@ def obtener_noticias():
         except Exception as e:
             print(f"   ⚠️ Error en API WP para {fuente['nombre']}: {e}")
 
-        # 2. Feed RSS como respaldo
+        # 2. Respaldo vía Feed RSS
         try:
             resp_rss = requests.get(fuente["url_rss"], headers=HEADERS, timeout=15)
             if resp_rss.status_code == 200:
@@ -139,7 +141,6 @@ def obtener_noticias():
                         parsed_time = getattr(entry, 'published_parsed', None)
                         fecha_dt = datetime.now(timezone.utc)
                         if parsed_time:
-                            import calendar
                             fecha_dt = datetime.fromtimestamp(calendar.timegm(parsed_time), tz=timezone.utc)
 
                         if fecha_dt < hace_30_dias:
@@ -208,8 +209,8 @@ def analizar_con_llm(titulo, texto, fuente):
         return None
 
 def ejecutar_agente():
-    # Reinicio completo de la base de datos para reconstruirla desde cero
-    inicializar_bd(reset=True)
+    # Mantenemos reset=False para que acumule las noticias y no borre el historial
+    inicializar_bd(reset=False)
     
     noticias = obtener_noticias()
     print(f"\n📰 Total de noticias únicas recuperadas para procesar: {len(noticias)}")
@@ -223,6 +224,7 @@ def ejecutar_agente():
         
         cursor.execute("SELECT id FROM noticias WHERE url = ?", (url_oficial,))
         if cursor.fetchone():
+            print(f"⏭️ Ya existe en BD: {item['titulo'][:40]}...")
             continue
             
         print(f"🧠 Analizando con Gemini: {item['titulo'][:50]}...")
