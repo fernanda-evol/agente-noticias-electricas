@@ -16,8 +16,8 @@ FUENTES = [
     },
     {
         "nombre": "ElectroMinería", 
-        "url_api": "https://electromineria.cl/wp-json/wp/v2/posts?per_page=50",
-        "url_rss": "https://electromineria.cl/feed/"
+        "url_api": "https://www.electromineria.cl/wp-json/wp/v2/posts?per_page=50",
+        "url_rss": "https://www.electromineria.cl/feed/"
     }
 ]
 
@@ -53,18 +53,11 @@ def inicializar_bd():
             procesado_el TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    # Limpieza automática preventiva de publicaciones de empleo previas
+    # Limpieza de publicaciones de empleo y URLs mal formadas
     cursor.execute("DELETE FROM noticias WHERE LOWER(titulo) LIKE '%ofertas de empleo%' OR LOWER(titulo) LIKE '%vacantes%'")
+    cursor.execute("DELETE FROM noticias WHERE url NOT LIKE 'http%'")
     conn.commit()
     conn.close()
-
-def normalizar_url(url):
-    if not url:
-        return ""
-    url_limpia = url.strip().rstrip("/")
-    url_limpia = url_limpia.replace("https://www.electromineria.cl", "https://electromineria.cl")
-    url_limpia = url_limpia.replace("https://www.revistaei.cl", "https://revistaei.cl")
-    return url_limpia
 
 def limpiar_html(html_content):
     if not html_content:
@@ -86,19 +79,17 @@ def obtener_noticias_hibridas():
     for fuente in FUENTES:
         print(f"📡 Consultando fuente: {fuente['nombre']}...")
         
-        # 1. Consulta vía WordPress REST API
+        # 1. Consulta REST API
         try:
             resp = requests.get(fuente["url_api"], headers=HEADERS, timeout=15)
             if resp.status_code == 200:
                 posts = resp.json()
                 if isinstance(posts, list):
-                    print(f"   [API WP] {len(posts)} artículos obtenidos.")
                     for post in posts:
                         titulo = limpiar_html(post.get("title", {}).get("rendered", ""))
-                        url = normalizar_url(post.get("link", ""))
+                        url_real = post.get("link", "").strip()
                         
-                        if es_oferta_empleo(titulo, ""):
-                            print(f"   🚫 Ignorada (Oferta de Empleo): {titulo[:40]}...")
+                        if es_oferta_empleo(titulo, "") or not url_real:
                             continue
 
                         date_str = post.get("date_gmt", "") or post.get("date", "")
@@ -117,31 +108,30 @@ def obtener_noticias_hibridas():
 
                         texto_limpio = limpiar_html(post.get("content", {}).get("rendered", ""))
                         
-                        if titulo and url and url not in noticias_map:
-                            noticias_map[url] = {
+                        if titulo and url_real not in noticias_map:
+                            noticias_map[url_real] = {
                                 "fuente": fuente["nombre"],
                                 "titulo": titulo,
-                                "url": url,
+                                "url": url_real,
                                 "fecha": fecha_dt.strftime('%Y-%m-%d %H:%M:%S'),
                                 "texto": texto_limpio
                             }
         except Exception as e:
             print(f"   ⚠️ Error en API WP para {fuente['nombre']}: {e}")
 
-        # 2. Respaldo vía RSS
+        # 2. Respaldo RSS
         try:
             resp_rss = requests.get(fuente["url_rss"], headers=HEADERS, timeout=15)
             if resp_rss.status_code == 200:
                 feed = feedparser.parse(resp_rss.content)
-                print(f"   [RSS] {len(feed.entries)} artículos obtenidos.")
                 for entry in feed.entries:
                     titulo = getattr(entry, 'title', '').strip()
-                    url = normalizar_url(getattr(entry, 'link', ''))
+                    url_real = getattr(entry, 'link', '').strip()
 
-                    if es_oferta_empleo(titulo, ""):
+                    if es_oferta_empleo(titulo, "") or not url_real:
                         continue
 
-                    if url and url not in noticias_map:
+                    if url_real not in noticias_map:
                         parsed_time = getattr(entry, 'published_parsed', None)
                         fecha_dt = datetime.now(timezone.utc)
                         if parsed_time:
@@ -156,10 +146,10 @@ def obtener_noticias_hibridas():
                         elif "summary" in entry:
                             content_raw = entry.summary
 
-                        noticias_map[url] = {
+                        noticias_map[url_real] = {
                             "fuente": fuente["nombre"],
                             "titulo": titulo,
-                            "url": url,
+                            "url": url_real,
                             "fecha": fecha_dt.strftime('%Y-%m-%d %H:%M:%S'),
                             "texto": limpiar_html(content_raw)
                         }
@@ -187,12 +177,12 @@ def analizar_con_llm(titulo, texto, fuente):
     Título: {titulo}
     Texto: {texto[:2500]}
     
-    INSTRUCCIÓN DE FILTRADO: Si la noticia es una oferta de empleo, anuncio de trabajo, aviso publicitario o no contiene información de mercado eléctrico, responde exactamente con:
+    INSTRUCCIÓN DE FILTRADO: Si la noticia es una oferta de empleo, anuncio de trabajo o no contiene información de mercado eléctrico, responde exactamente:
     {{"es_relevante": false}}
 
     De lo contrario, responde en JSON estricto con las siguientes llaves:
     1. "es_relevante": true
-    2. "categoria": Elige la más precisa entre ["Transmisión", "Almacenamiento (BESS)", "Generación/ERNC", "Regulación/Normativa", "Mercado Mayorista/Precios", "PMGD/Distribución", "Hidrógeno Verde/Descarbonización"].
+    2. "categoria": Elige entre ["Transmisión", "Almacenamiento (BESS)", "Generación/ERNC", "Regulación/Normativa", "Mercado Mayorista/Precios", "PMGD/Distribución", "Hidrógeno Verde/Descarbonización"].
     3. "resumen_ejecutivo": Un párrafo técnico de 2-3 oraciones sintetizando el impacto.
     4. "impacto_mercado": "Alto", "Medio", o "Bajo".
     5. "actores_mencionados": Lista con nombres de empresas, instituciones o reguladores mencionados.
@@ -222,8 +212,8 @@ def ejecutar_agente():
     
     noticias_guardadas = 0
     for item in noticias:
-        url_norm = normalizar_url(item["url"])
-        cursor.execute("SELECT id FROM noticias WHERE url = ? OR url = ? OR url = ?", (url_norm, url_norm + "/", item["url"]))
+        url_actual = item["url"]
+        cursor.execute("SELECT id FROM noticias WHERE url = ?", (url_actual,))
         if cursor.fetchone():
             continue
             
@@ -238,7 +228,7 @@ def ejecutar_agente():
             ''', (
                 item["fuente"],
                 item["titulo"],
-                url_norm,
+                url_actual,
                 item["fecha"],
                 analisis.get("categoria", "Sin Categoría"),
                 analisis.get("resumen_ejecutivo", ""),
@@ -249,8 +239,6 @@ def ejecutar_agente():
             conn.commit()
             noticias_guardadas += 1
             print(f"✅ Guardada en BD.")
-        else:
-            print(f"🚫 Descartada por irrelevante/empleo.")
             
     conn.close()
     print(f"\n🚀 Proceso finalizado. {noticias_guardadas} noticias agregadas a {DB_NAME}.")
