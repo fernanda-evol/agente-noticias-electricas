@@ -10,24 +10,18 @@ import urllib3
 from datetime import datetime, timedelta, timezone
 from google import genai
 
-# Deshabilitar advertencias SSL para fuentes secundarias
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 FUENTES = [
     {
         "nombre": "Revista EI", 
-        "url_api": "https://www.revistaei.cl/wp-json/wp/v2/posts?per_page=50",
+        "url_api": "https://www.revistaei.cl/wp-json/wp/v2/posts?per_page=40",
         "url_rss": "https://www.revistaei.cl/feed/"
     },
     {
         "nombre": "ElectroMinería", 
-        "url_api": "https://www.electromineria.cl/wp-json/wp/v2/posts?per_page=50",
+        "url_api": "https://www.electromineria.cl/wp-json/wp/v2/posts?per_page=40",
         "url_rss": "https://www.electromineria.cl/feed/"
-    },
-    {
-        "nombre": "ElectroMinería", 
-        "url_api": "https://electromineria.cl/wp-json/wp/v2/posts?per_page=50",
-        "url_rss": "https://electromineria.cl/feed/"
     }
 ]
 
@@ -35,7 +29,7 @@ DB_NAME = "noticias_energia.db"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    "Accept": "application/json, text/javascript, */*; q=0.01"
 }
 
 PALABRAS_EXCLUIR_EMPLEO = [
@@ -48,7 +42,6 @@ PALABRAS_EXCLUIR_EMPLEO = [
 def inicializar_bd(reset=True):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    
     if reset:
         cursor.execute("DROP TABLE IF EXISTS noticias")
         
@@ -88,15 +81,15 @@ def obtener_noticias():
     hace_30_dias = datetime.now(timezone.utc) - timedelta(days=30)
     
     for fuente in FUENTES:
-        print(f"📡 Consultando fuente: {fuente['nombre']} ({fuente['url_api']})...")
+        print(f"📡 Consultando fuente: {fuente['nombre']}...")
         
-        # 1. API WP REST
+        # 1. API WordPress REST
         try:
             resp = requests.get(fuente["url_api"], headers=HEADERS, timeout=15, verify=False)
             if resp.status_code == 200:
                 posts = resp.json()
                 if isinstance(posts, list):
-                    print(f"   [API WP] {len(posts)} artículos obtenidos.")
+                    print(f"   [API WP] {len(posts)} artículos obtenidos de {fuente['nombre']}.")
                     for post in posts:
                         titulo = limpiar_html(post.get("title", {}).get("rendered", ""))
                         url_oficial = post.get("link", "").strip()
@@ -129,14 +122,13 @@ def obtener_noticias():
                                 "texto": texto_limpio
                             }
         except Exception as e:
-            print(f"   ⚠️ Error en API WP para {fuente['nombre']}: {e}")
+            print(f"   ⚠️ Error API WP ({fuente['nombre']}): {e}")
 
         # 2. Respaldo RSS
         try:
             resp_rss = requests.get(fuente["url_rss"], headers=HEADERS, timeout=15, verify=False)
             if resp_rss.status_code == 200:
                 feed = feedparser.parse(resp_rss.content)
-                print(f"   [RSS] {len(feed.entries)} artículos obtenidos.")
                 for entry in feed.entries:
                     titulo = getattr(entry, 'title', '').strip()
                     url_oficial = getattr(entry, 'link', '').strip()
@@ -167,7 +159,7 @@ def obtener_noticias():
                             "texto": limpiar_html(content_raw)
                         }
         except Exception as e:
-            print(f"   ⚠️ Error en RSS para {fuente['nombre']}: {e}")
+            print(f"   ⚠️ Error RSS ({fuente['nombre']}): {e}")
 
     return list(noticias_map.values())
 
@@ -177,31 +169,29 @@ def analizar_con_llm(titulo, texto, fuente):
 
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        print("⚠️ Variable GEMINI_API_KEY no configurada.")
+        print("❌ GEMINI_API_KEY no encontrada.")
         return None
 
     client = genai.Client(api_key=api_key)
     
     prompt = f"""
-    Eres un analista senior del mercado eléctrico chileno (CNE, Coordinador Eléctrico, BESS, Transmisión, Regulación, PMGD, Precios Spot/Barra).
-    
-    Analiza la siguiente noticia publicada en {fuente}:
+    Eres un analista senior del mercado eléctrico chileno.
+    Analiza esta noticia publicada en {fuente}:
     
     Título: {titulo}
     Texto: {texto[:2500]}
     
-    INSTRUCCIÓN DE FILTRADO: Si la noticia es una oferta de empleo, reclutamiento o publicidad, responde exactamente:
-    {{"es_relevante": false}}
+    SI ES OFERTA DE TRABAJO O RECLUTAMIENTO, RESPONDE EXACTAMENTE: {{"es_relevante": false}}
 
-    De lo contrario, analiza técnicamente y responde ÚNICAMENTE en JSON estricto con las siguientes llaves:
+    DE LO CONTRARIO, RESPONDE EN JSON ESTRICTO CON:
     1. "es_relevante": true
-    2. "categoria": Selecciona la más precisa entre ["Transmisión", "Almacenamiento (BESS)", "Generación/ERNC", "Regulación/Normativa", "Mercado Mayorista/Precios", "PMGD/Distribución", "Hidrógeno Verde/Descarbonización"].
-    3. "resumen_ejecutivo": Un párrafo técnico de 2-3 oraciones sintetizando el impacto operativo o regulatorio.
-    4. "impacto_mercado": Clasifica estrictamente según relevancia estratégica en ["Alto", "Medio", "Bajo"].
-    5. "actores_mencionados": Lista de cadenas con los nombres de empresas, autoridades o instituciones mencionadas (ej. ["CNE", "Coordinador Eléctrico", "Enel"]).
-    6. "sentimiento": Selecciona entre ["Positivo", "Neutro", "Riesgo/Negativo"].
+    2. "categoria": Elige la mejor entre ["Transmisión", "Almacenamiento (BESS)", "Generación/ERNC", "Regulación/Normativa", "Mercado Mayorista/Precios", "PMGD/Distribución", "Hidrógeno Verde/Descarbonización"].
+    3. "resumen_ejecutivo": Párrafo técnico de 2-3 oraciones sintetizando el impacto.
+    4. "impacto_mercado": Elige estrictamente entre ["Alto", "Medio", "Bajo"].
+    5. "actores_mencionados": Lista de empresas, autoridades u organismos mencionados (ej. ["CNE", "Coordinador Eléctrico", "Enel"]).
+    6. "sentimiento": Elige entre ["Positivo", "Neutro", "Riesgo/Negativo"].
     """
-    
+
     for model_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
         try:
             response = client.models.generate_content(
@@ -209,22 +199,23 @@ def analizar_con_llm(titulo, texto, fuente):
                 contents=prompt,
                 config={"response_mime_type": "application/json"}
             )
-            raw_text = response.text
-            if raw_text:
-                cleaned = re.sub(r'^```json\s*', '', raw_text.strip(), flags=re.MULTILINE)
+            if response.text:
+                cleaned = re.sub(r'^```json\s*', '', response.text.strip(), flags=re.MULTILINE)
                 cleaned = re.sub(r'^```\s*', '', cleaned, flags=re.MULTILINE).strip()
-                return json.loads(cleaned)
+                res_json = json.loads(cleaned)
+                if isinstance(res_json, dict) and "categoria" in res_json:
+                    return res_json
         except Exception as e:
+            print(f" Error modelo {model_name}: {e}")
             continue
 
     return None
 
 def ejecutar_agente():
-    # Reinicio activado para limpiar registros genéricos y procesar análitica completa
     inicializar_bd(reset=True)
     
     noticias = obtener_noticias()
-    print(f"\n📰 Total de noticias únicas recuperadas: {len(noticias)}")
+    print(f"\n📰 Total de noticias recuperadas: {len(noticias)}")
     
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -237,7 +228,7 @@ def ejecutar_agente():
         if cursor.fetchone():
             continue
             
-        print(f"🧠 Analizando con Gemini: {item['titulo'][:50]}...")
+        print(f"🧠 Analizando con IA: {item['titulo'][:50]}...")
         analisis = analizar_con_llm(item["titulo"], item["texto"], item["fuente"])
         
         if analisis and analisis.get("es_relevante", True):
@@ -254,7 +245,7 @@ def ejecutar_agente():
                 item["titulo"],
                 url_oficial,
                 item["fecha"],
-                analisis.get("categoria", "Mercado Eléctrico"),
+                analisis.get("categoria", "Regulación/Normativa"),
                 analisis.get("resumen_ejecutivo", ""),
                 analisis.get("impacto_mercado", "Medio"),
                 json.dumps(actores_list, ensure_ascii=False),
@@ -262,10 +253,10 @@ def ejecutar_agente():
             ))
             conn.commit()
             noticias_guardadas += 1
-            print(f"✅ Guardada en BD.")
+            print(f"✅ Guardada con éxito.")
             
     conn.close()
-    print(f"\n🚀 Proceso finalizado. {noticias_guardadas} noticias procesadas en {DB_NAME}.")
+    print(f"\n🚀 Proceso finalizado. {noticias_guardadas} noticias procesadas en BD.")
 
 if __name__ == "__main__":
     ejecutar_agente()
