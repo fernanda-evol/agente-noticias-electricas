@@ -18,25 +18,9 @@ st.set_page_config(
 # Estilos CSS personalizados para tarjetas visuales
 st.markdown("""
     <style>
-    .main-header {
-        font-size: 2.2rem;
-        font-weight: 700;
-        color: #1E3A8A;
-        margin-bottom: 0.5rem;
-    }
-    .sub-header {
-        font-size: 1.1rem;
-        color: #4B5563;
-        margin-bottom: 2rem;
-    }
-    .news-card {
-        background-color: #FFFFFF;
-        padding: 1.5rem;
-        border-radius: 10px;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-        margin-bottom: 1.2rem;
-        border: 1px solid #E5E7EB;
-    }
+    .main-header { font-size: 2.2rem; font-weight: 700; color: #1E3A8A; margin-bottom: 0.5rem; }
+    .sub-header { font-size: 1.1rem; color: #4B5563; margin-bottom: 2rem; }
+    .news-card { background-color: #FFFFFF; padding: 1.5rem; border-radius: 10px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); margin-bottom: 1.2rem; border: 1px solid #E5E7EB; }
     .badge-alto { background-color: #FEE2E2; color: #991B1B; padding: 4px 10px; border-radius: 6px; font-weight: bold; font-size: 0.85rem; }
     .badge-medio { background-color: #FEF3C7; color: #92400E; padding: 4px 10px; border-radius: 6px; font-weight: bold; font-size: 0.85rem; }
     .badge-bajo { background-color: #D1FAE5; color: #065F46; padding: 4px 10px; border-radius: 6px; font-weight: bold; font-size: 0.85rem; }
@@ -47,7 +31,7 @@ st.markdown("""
 # ==========================================
 # 2. CARGA DE DATOS DE SQLITE
 # ==========================================
-@st.cache_data(ttl=300)  # Se actualiza cada 5 minutos
+@st.cache_data(ttl=60)
 def cargar_datos():
     try:
         conn = sqlite3.connect("noticias_energia.db")
@@ -55,8 +39,13 @@ def cargar_datos():
         conn.close()
         return df
     except Exception as e:
-        st.error(f"Error cargando la base de datos: {e}")
         return pd.DataFrame()
+
+# Botón manual de refresco en la barra lateral
+st.sidebar.header("⚙️ Opciones")
+if st.sidebar.button("🔄 Actualizar Datos / Limpiar Caché"):
+    st.cache_data.clear()
+    st.rerun()
 
 df_raw = cargar_datos()
 
@@ -72,22 +61,17 @@ else:
     # ==========================================
     st.sidebar.header("🔍 Filtros")
     
-    # Filtro por Fuente
     fuentes_disponibles = list(df_raw['fuente'].unique())
     fuentes_sel = st.sidebar.multiselect("Fuente de Noticias", fuentes_disponibles, default=fuentes_disponibles)
     
-    # Filtro por Categoría
     categorias_disponibles = list(df_raw['categoria'].unique())
     categorias_sel = st.sidebar.multiselect("Categoría", categorias_disponibles, default=categorias_disponibles)
     
-    # Filtro por Nivel de Impacto
     impactos_disponibles = ["Alto", "Medio", "Bajo"]
     impacto_sel = st.sidebar.multiselect("Impacto de Mercado", impactos_disponibles, default=impactos_disponibles)
     
-    # Búsqueda libre
     query_busqueda = st.sidebar.text_input("🔎 Buscar palabra clave", "")
 
-    # Filtrar el DataFrame
     df_filtrado = df_raw[
         (df_raw['fuente'].isin(fuentes_sel)) &
         (df_raw['categoria'].isin(categorias_sel)) &
@@ -101,7 +85,7 @@ else:
         ]
 
     # ==========================================
-    # 4. MÉTRICAS CLAVE (KPIs)
+    # 4. MÉTRICAS CLAVE
     # ==========================================
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -124,7 +108,6 @@ else:
     # ==========================================
     tab1, tab2, tab3 = st.tabs(["📰 Feed de Análisis IA", "📊 Gráficos y Tendencias", "🗃️ Tabla de Datos"])
 
-    # TAB 1: FEED DE NOTICIAS CON TARJETAS
     with tab1:
         st.subheader("Últimos Análisis de Mercado Generados por Gemini")
         for _, row in df_filtrado.iterrows():
@@ -160,7 +143,6 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
-    # TAB 2: GRÁFICOS E INTERACTIVOS
     with tab2:
         st.subheader("Estadísticas del Mercado")
         g_col1, g_col2 = st.columns(2)
@@ -187,7 +169,6 @@ else:
             )
             st.plotly_chart(fig_imp, use_container_width=True)
 
-        # Ranking de Actores Mencionados
         all_actores = []
         for a_str in df_filtrado['actores_mencionados']:
             try:
@@ -211,7 +192,6 @@ else:
             fig_actores.update_layout(yaxis={'categoryorder': 'total ascending'})
             st.plotly_chart(fig_actores, use_container_width=True)
 
-    # TAB 3: TABLA COMPLETA
     with tab3:
         st.subheader("Registros en Base de Datos")
         st.dataframe(df_filtrado[['fecha_publicacion', 'fuente', 'titulo', 'categoria', 'impacto_mercado', 'sentimiento']], use_container_width=True)
