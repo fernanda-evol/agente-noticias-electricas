@@ -13,24 +13,14 @@ from google import genai
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-FUENTES = [
-    {
-        "nombre": "Revista EI", 
-        "url_api": "https://www.revistaei.cl/wp-json/wp/v2/posts?per_page=30",
-        "url_rss": "https://www.revistaei.cl/feed/"
-    },
-    {
-        "nombre": "ElectroMinería", 
-        "url_api": "https://electromineria.cl/wp-json/wp/v2/posts?per_page=30",
-        "url_rss": "https://electromineria.cl/category/panorama-energetico/feed/"
-    }
-]
-
 DB_NAME = "noticias_energia.db"
 
+# Encabezados con simulación de navegador completo
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/json,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache"
 }
 
 PALABRAS_EXCLUIR_EMPLEO = [
@@ -89,7 +79,6 @@ def es_oferta_empleo(titulo, texto):
 def clasificar_localmente(titulo, texto):
     contenido = f"{titulo} {texto}".lower()
     
-    # Categoría
     cat = "Generación/ERNC"
     if any(k in contenido for k in ["bess", "almacenamiento", "batería", "baterias"]):
         cat = "Almacenamiento (BESS)"
@@ -104,14 +93,12 @@ def clasificar_localmente(titulo, texto):
     elif any(k in contenido for k in ["precio", "spot", "cmg", "costo marginal", "mayorista"]):
         cat = "Mercado Mayorista/Precios"
 
-    # Impacto
     impacto = "Medio"
     if any(k in contenido for k in ["cne", "coordinador eléctrico", "decreto", "ley", "resolución", "vertimiento", "insolvencia", "licitación", "mw", "us$"]):
         impacto = "Alto"
     elif any(k in contenido for k in ["nombramiento", "premio", "evento", "reconocimiento", "aniversario"]):
         impacto = "Bajo"
 
-    # Actores
     actores = []
     if "acenor" in contenido: actores.append("Acenor")
     if "cne" in contenido: actores.append("CNE")
@@ -128,91 +115,85 @@ def clasificar_localmente(titulo, texto):
         "sentimiento": "Neutro"
     }
 
+def extraer_electromineria_directo():
+    noticias = []
+    url_seccion = "https://electromineria.cl/category/panorama-energetico/"
+    print(f"🕸️ Extrayendo directamente desde HTML: {url_seccion}...")
+    try:
+        resp = requests.get(url_seccion, headers=HEADERS, timeout=15, verify=False)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.content, "html.parser")
+            # Buscar todos los contenedores de artículos e hipervínculos
+            for a_tag in soup.find_all("a", href=True):
+                href = normalizar_url(a_tag["href"])
+                titulo = limpiar_html(a_tag.get_text())
+                
+                # Filtrar enlaces reales a artículos de noticias
+                if href.startswith("https://electromineria.cl/") and not any(x in href for x in ["/category/", "/tag/", "/page/", "/author/", "#", "feed"]):
+                    if len(titulo) > 25 and not es_oferta_empleo(titulo, ""):
+                        noticias.append({
+                            "fuente": "ElectroMinería",
+                            "titulo": titulo,
+                            "url": href,
+                            "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+                            "texto": titulo
+                        })
+            print(f"   [Scraper HTML] {len(noticias)} enlaces extraídos de ElectroMinería.")
+    except Exception as e:
+        print(f"⚠️ Error al extraer ElectroMinería directo: {e}")
+    return noticias
+
 def obtener_noticias():
     noticias_map = {}
     hace_30_dias = datetime.now(timezone.utc) - timedelta(days=30)
     
-    for fuente in FUENTES:
-        print(f"📡 Consultando fuente: {fuente['nombre']}...")
-        
-        # 1. RSS Feed
-        try:
-            resp_rss = requests.get(fuente["url_rss"], headers=HEADERS, timeout=15, verify=False)
-            if resp_rss.status_code == 200:
-                feed = feedparser.parse(resp_rss.content)
-                print(f"   [RSS] {len(feed.entries)} artículos obtenidos de {fuente['nombre']}.")
-                for entry in feed.entries:
-                    titulo = getattr(entry, 'title', '').strip()
-                    url_oficial = normalizar_url(getattr(entry, 'link', ''))
+    # 1. Scraper Directo ElectroMinería
+    for item in extraer_electromineria_directo():
+        url_norm = normalizar_url(item["url"])
+        if url_norm not in noticias_map:
+            noticias_map[url_norm] = item
 
+    # 2. Extracción Revista EI
+    print("📡 Consultando fuente: Revista EI...")
+    try:
+        resp = requests.get("https://www.revistaei.cl/wp-json/wp/v2/posts?per_page=30", headers=HEADERS, timeout=15, verify=False)
+        if resp.status_code == 200:
+            posts = resp.json()
+            if isinstance(posts, list):
+                print(f"   [API WP] {len(posts)} artículos obtenidos de Revista EI.")
+                for post in posts:
+                    titulo = limpiar_html(post.get("title", {}).get("rendered", ""))
+                    url_oficial = normalizar_url(post.get("link", ""))
+                    
                     if not url_oficial or es_oferta_empleo(titulo, ""):
                         continue
 
-                    if url_oficial not in noticias_map:
-                        parsed_time = getattr(entry, 'published_parsed', None)
-                        fecha_dt = datetime.now(timezone.utc)
-                        if parsed_time:
-                            fecha_dt = datetime.fromtimestamp(calendar.timegm(parsed_time), tz=timezone.utc)
+                    date_str = post.get("date_gmt", "") or post.get("date", "")
+                    fecha_dt = datetime.now(timezone.utc)
+                    if date_str:
+                        date_clean = re.sub(r'\.\d+', '', date_str.replace("Z", ""))
+                        for fmt in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"]:
+                            try:
+                                fecha_dt = datetime.strptime(date_clean, fmt).replace(tzinfo=timezone.utc)
+                                break
+                            except ValueError:
+                                pass
 
-                        if fecha_dt < hace_30_dias:
-                            continue
+                    if fecha_dt < hace_30_dias:
+                        continue
 
-                        content_raw = ""
-                        if "content" in entry and len(entry.content) > 0:
-                            content_raw = entry.content[0].value
-                        elif "summary" in entry:
-                            content_raw = entry.summary
-
+                    texto_limpio = limpiar_html(post.get("content", {}).get("rendered", ""))
+                    
+                    if titulo and url_oficial not in noticias_map:
                         noticias_map[url_oficial] = {
-                            "fuente": fuente["nombre"],
+                            "fuente": "Revista EI",
                             "titulo": titulo,
                             "url": url_oficial,
                             "fecha": fecha_dt.strftime('%Y-%m-%d %H:%M:%S'),
-                            "texto": limpiar_html(content_raw)
+                            "texto": texto_limpio
                         }
-        except Exception as e:
-            print(f"   ⚠️ Error RSS ({fuente['nombre']}): {e}")
-
-        # 2. API WP
-        try:
-            resp = requests.get(fuente["url_api"], headers=HEADERS, timeout=15, verify=False)
-            if resp.status_code == 200:
-                posts = resp.json()
-                if isinstance(posts, list):
-                    print(f"   [API WP] {len(posts)} artículos obtenidos de {fuente['nombre']}.")
-                    for post in posts:
-                        titulo = limpiar_html(post.get("title", {}).get("rendered", ""))
-                        url_oficial = normalizar_url(post.get("link", ""))
-                        
-                        if not url_oficial or es_oferta_empleo(titulo, ""):
-                            continue
-
-                        date_str = post.get("date_gmt", "") or post.get("date", "")
-                        fecha_dt = datetime.now(timezone.utc)
-                        if date_str:
-                            date_clean = re.sub(r'\.\d+', '', date_str.replace("Z", ""))
-                            for fmt in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"]:
-                                try:
-                                    fecha_dt = datetime.strptime(date_clean, fmt).replace(tzinfo=timezone.utc)
-                                    break
-                                except ValueError:
-                                    pass
-
-                        if fecha_dt < hace_30_dias:
-                            continue
-
-                        texto_limpio = limpiar_html(post.get("content", {}).get("rendered", ""))
-                        
-                        if titulo and url_oficial not in noticias_map:
-                            noticias_map[url_oficial] = {
-                                "fuente": fuente["nombre"],
-                                "titulo": titulo,
-                                "url": url_oficial,
-                                "fecha": fecha_dt.strftime('%Y-%m-%d %H:%M:%S'),
-                                "texto": texto_limpio
-                            }
-        except Exception as e:
-            print(f"   ⚠️ Error API WP ({fuente['nombre']}): {e}")
+    except Exception as e:
+        print(f"   ⚠️ Error Revista EI: {e}")
 
     return list(noticias_map.values())
 
@@ -310,7 +291,7 @@ def ejecutar_agente():
             ))
             conn.commit()
             noticias_guardadas += 1
-            print(f"✅ Guardada -> Cat: {analisis.get('categoria')} | Impacto: {analisis.get('impacto_mercado')}")
+            print(f"✅ Guardada -> Fuente: {item['fuente']} | Cat: {analisis.get('categoria')} | Impacto: {analisis.get('impacto_mercado')}")
             
         time.sleep(3.5)
 
