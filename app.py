@@ -5,19 +5,29 @@ import json
 from datetime import datetime, timedelta
 
 st.set_page_config(
-    page_title="Monitor Mercado Eléctrico",
+    page_title="Monitor Mercado Eléctrico Chileno",
     page_icon="⚡",
     layout="wide"
 )
 
+# Estilos CSS para Badges y Tarjetas
+st.markdown("""
+<style>
+    .badge-alto { background-color: #ff4b4b; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
+    .badge-medio { background-color: #ffa726; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
+    .badge-bajo { background-color: #66bb6a; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
+    .badge-cat { background-color: #e0f7fa; color: #006064; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
+    .card-news { background-color: #ffffff; padding: 18px; border-radius: 8px; border: 1px solid #e0e0e0; margin-bottom: 15px; }
+</style>
+""", unsafe_allow_html=True)
+
 DB_NAME = "noticias_energia.db"
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=60)
 def cargar_datos():
     try:
         conn = sqlite3.connect(DB_NAME)
-        query = "SELECT * FROM noticias ORDER BY fecha_publicacion DESC"
-        df = pd.read_sql_query(query, conn)
+        df = pd.read_sql_query("SELECT * FROM noticias ORDER BY fecha_publicacion DESC", conn)
         conn.close()
         if not df.empty:
             df['fecha_dt'] = pd.to_datetime(df['fecha_publicacion'], errors='coerce')
@@ -27,7 +37,6 @@ def cargar_datos():
 
 df = cargar_datos()
 
-# Panel Lateral
 st.sidebar.title("⚙️ Opciones")
 if st.sidebar.button("🔄 Actualizar Datos / Limpiar Caché"):
     st.cache_data.clear()
@@ -38,7 +47,6 @@ st.sidebar.title("🔍 Filtros")
 if df.empty:
     st.warning("Aún no hay noticias registradas. Ejecuta el agente para poblar la base de datos.")
 else:
-    # 1. Filtro por Rango de Fechas
     fechas_validas = df['fecha_dt'].dropna()
     min_date = fechas_validas.min().date() if not fechas_validas.empty else datetime.now().date() - timedelta(days=30)
     max_date = fechas_validas.max().date() if not fechas_validas.empty else datetime.now().date()
@@ -50,7 +58,6 @@ else:
         max_value=max_date
     )
 
-    # 2. Filtros Dinámicos
     fuentes_disponibles = sorted(list(df['fuente'].unique()))
     fuentes_sel = st.sidebar.multiselect("Fuente de Noticias", fuentes_disponibles, default=fuentes_disponibles)
 
@@ -63,22 +70,17 @@ else:
 
     busqueda = st.sidebar.text_input("🔎 Buscar palabra clave")
 
-    # Aplicación de Filtros
     df_filtrado = df.copy()
 
-    # Filtrar Fechas
     if isinstance(rango_fechas, (list, tuple)):
         if len(rango_fechas) == 2:
-            f_inicio, f_fin = rango_fechas
             df_filtrado = df_filtrado[
-                (df_filtrado['fecha_dt'].dt.date >= f_inicio) & 
-                (df_filtrado['fecha_dt'].dt.date <= f_fin)
+                (df_filtrado['fecha_dt'].dt.date >= rango_fechas[0]) & 
+                (df_filtrado['fecha_dt'].dt.date <= rango_fechas[1])
             ]
         elif len(rango_fechas) == 1:
-            f_inicio = rango_fechas[0]
-            df_filtrado = df_filtrado[df_filtrado['fecha_dt'].dt.date == f_inicio]
+            df_filtrado = df_filtrado[df_filtrado['fecha_dt'].dt.date == rango_fechas[0]]
 
-    # Filtrar Selectores
     if fuentes_sel:
         df_filtrado = df_filtrado[df_filtrado['fuente'].isin(fuentes_sel)]
     if cat_sel:
@@ -93,11 +95,9 @@ else:
             df_filtrado['resumen_ejecutivo'].str.lower().str.contains(b_lower)
         ]
 
-    # Encabezado Principal
     st.title("⚡ Monitor & Análisis del Mercado Eléctrico Chileno")
     st.caption("Agente automatizado con Inteligencia Artificial sobre Revista EI y ElectroMinería.")
 
-    # Métricas KPI
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Noticias Analizadas", len(df_filtrado))
     alto_count = len(df_filtrado[df_filtrado['impacto_mercado'] == 'Alto'])
@@ -118,9 +118,9 @@ else:
             st.info("No hay noticias que coincidan con los filtros seleccionados.")
         else:
             for _, row in df_filtrado.iterrows():
-                badge_color = "🔴" if row['impacto_mercado'] == "Alto" else ("🟡" if row['impacto_mercado'] == "Medio" else "🟢")
+                imp = row['impacto_mercado']
+                badge_class = "badge-alto" if imp == "Alto" else ("badge-medio" if imp == "Medio" else "badge-bajo")
                 
-                # Formatear lista de actores
                 actores_str = "Sin actores específicos"
                 if row['actores_mencionados']:
                     try:
@@ -134,13 +134,21 @@ else:
 
                 fecha_corta = str(row['fecha_publicacion'])[:10]
 
-                with st.container():
-                    st.markdown(f"### {row['titulo']}")
-                    st.caption(f"{badge_color} **Impacto {row['impacto_mercado']}** | 🏷️ **{row['categoria']}** | 📰 **{row['fuente']}** | 📅 **{fecha_corta}**")
-                    st.info(f"💡 **Resumen Ejecutivo:** {row['resumen_ejecutivo']}")
-                    st.write(f"🏛️ **Actores / Empresas:** {actores_str} | 📊 **Sentimiento:** {row['sentimiento']}")
-                    st.markdown(f"🔗 [Leer artículo completo en {row['fuente']}]({row['url']})")
-                    st.markdown("---")
+                st.markdown(f"""
+                <div class="card-news">
+                    <span class="{badge_class}">Impacto {imp}</span> 
+                    <span class="badge-cat">{row['categoria']}</span>
+                    <span style="float: right; color: #757575; font-size: 13px;"><b>{row['fuente']}</b> | {fecha_corta}</span>
+                    <h3 style="margin-top: 10px; margin-bottom: 10px;">{row['titulo']}</h3>
+                    <div style="background-color: #f5f5f5; padding: 12px; border-left: 4px solid #1976d2; margin-bottom: 10px; font-size: 14px;">
+                        💡 <b>Resumen Ejecutivo:</b> {row['resumen_ejecutivo']}
+                    </div>
+                    <p style="font-size: 13px; color: #424242; margin-bottom: 5px;">
+                        🏛️ <b>Actores / Empresas:</b> {actores_str} &nbsp;|&nbsp; 📊 <b>Sentimiento:</b> {row['sentimiento']}
+                    </p>
+                    <a href="{row['url']}" target="_blank" style="font-size: 13px; text-decoration: none; color: #1976d2; font-weight: bold;">Leer artículo completo en {row['fuente']} →</a>
+                </div>
+                """, unsafe_allow_html=True)
 
     with tab2:
         st.subheader("Estadísticas del Mercado")
