@@ -15,7 +15,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 DB_NAME = "noticias_energia.db"
 
-# Encabezados con simulación de navegador completo
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -115,45 +114,68 @@ def clasificar_localmente(titulo, texto):
         "sentimiento": "Neutro"
     }
 
-def extraer_electromineria_directo():
+def extraer_electromineria_divi():
     noticias = []
     url_seccion = "https://electromineria.cl/category/panorama-energetico/"
-    print(f"🕸️ Extrayendo directamente desde HTML: {url_seccion}...")
+    print(f"🕸️ Extrayendo con selector Divi desde: {url_seccion}...")
     try:
         resp = requests.get(url_seccion, headers=HEADERS, timeout=15, verify=False)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.content, "html.parser")
-            # Buscar todos los contenedores de artículos e hipervínculos
-            for a_tag in soup.find_all("a", href=True):
-                href = normalizar_url(a_tag["href"])
-                titulo = limpiar_html(a_tag.get_text())
+            
+            # Buscar contenedores estándar de WordPress y temas Divi
+            elementos = soup.find_all(["article", "div"], class_=re.compile(r'post|et_pb_post|entry'))
+            
+            for el in elementos:
+                # Buscar el enlace y el título dentro del bloque Divi
+                a_tag = el.find("a", href=True)
+                h_tag = el.find(["h2", "h3", "h4"])
                 
-                # Filtrar enlaces reales a artículos de noticias
-                if href.startswith("https://electromineria.cl/") and not any(x in href for x in ["/category/", "/tag/", "/page/", "/author/", "#", "feed"]):
-                    if len(titulo) > 25 and not es_oferta_empleo(titulo, ""):
-                        noticias.append({
-                            "fuente": "ElectroMinería",
-                            "titulo": titulo,
-                            "url": href,
-                            "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
-                            "texto": titulo
-                        })
-            print(f"   [Scraper HTML] {len(noticias)} enlaces extraídos de ElectroMinería.")
+                if a_tag and h_tag:
+                    url = normalizar_url(a_tag["href"])
+                    titulo = limpiar_html(h_tag.get_text())
+                    
+                    if url.startswith("https://electromineria.cl/") and not any(x in url for x in ["/category/", "/tag/", "/page/", "/author/", "#", "feed"]):
+                        if len(titulo) > 20 and not es_oferta_empleo(titulo, ""):
+                            noticias.append({
+                                "fuente": "ElectroMinería",
+                                "titulo": titulo,
+                                "url": url,
+                                "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+                                "texto": titulo
+                            })
+            
+            # Método alternativo por si los bloques Divi varían: buscar todos los h2/h3 con enlaces directos
+            if not noticias:
+                for h in soup.find_all(["h2", "h3"]):
+                    a = h.find("a", href=True)
+                    if a:
+                        url = normalizar_url(a["href"])
+                        titulo = limpiar_html(h.get_text())
+                        if url.startswith("https://electromineria.cl/") and len(titulo) > 20 and not es_oferta_empleo(titulo, ""):
+                            noticias.append({
+                                "fuente": "ElectroMinería",
+                                "titulo": titulo,
+                                "url": url,
+                                "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+                                "texto": titulo
+                            })
+
+            print(f"   [Scraper Divi] {len(noticias)} artículos extraídos de ElectroMinería.")
     except Exception as e:
-        print(f"⚠️ Error al extraer ElectroMinería directo: {e}")
+        print(f"⚠️ Error en Scraper Divi ElectroMinería: {e}")
     return noticias
 
 def obtener_noticias():
     noticias_map = {}
     hace_30_dias = datetime.now(timezone.utc) - timedelta(days=30)
     
-    # 1. Scraper Directo ElectroMinería
-    for item in extraer_electromineria_directo():
-        url_norm = normalizar_url(item["url"])
-        if url_norm not in noticias_map:
-            noticias_map[url_norm] = item
+    # 1. Extracción Estructural Divi ElectroMinería
+    for item in extraer_electromineria_divi():
+        if item["url"] not in noticias_map:
+            noticias_map[item["url"]] = item
 
-    # 2. Extracción Revista EI
+    # 2. Extracción Revista EI (API WP)
     print("📡 Consultando fuente: Revista EI...")
     try:
         resp = requests.get("https://www.revistaei.cl/wp-json/wp/v2/posts?per_page=30", headers=HEADERS, timeout=15, verify=False)
@@ -245,7 +267,7 @@ def analizar_con_llm(titulo, texto, fuente):
             if isinstance(res_json, dict) and "categoria" in res_json:
                 return res_json
     except Exception as e:
-        print(f"⚠️ Limit de cuota Gemini o Error. Usando fallback inteligente local: {e}")
+        print(f"⚠️ Límite de cuota Gemini o Error. Usando fallback inteligente local: {e}")
 
     return fallback_local
 
