@@ -30,7 +30,12 @@ def cargar_datos():
         df = pd.read_sql_query("SELECT * FROM noticias ORDER BY fecha_publicacion DESC", conn)
         conn.close()
         if not df.empty:
-            df['fecha_dt'] = pd.to_datetime(df['fecha_publicacion'], errors='coerce')
+            # format='mixed' es necesario porque la columna mezcla fechas con
+            # huso horario (las nuevas, con "+00:00") y sin él (las antiguas).
+            # Sin esto, pandas infiere el formato del primer valor y descarta
+            # en silencio (-> NaT) las filas que no calzan con ese formato,
+            # aunque se use utc=True — es como desaparecían las noticias.
+            df['fecha_dt'] = pd.to_datetime(df['fecha_publicacion'], errors='coerce', utc=True, format='mixed')
         return df
     except Exception:
         return pd.DataFrame()
