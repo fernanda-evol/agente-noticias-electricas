@@ -12,18 +12,15 @@ from google import genai
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Fuentes con feeds RSS directos de sus secciones principales
 FUENTES = [
     {
         "nombre": "Revista EI", 
+        "url_api": "https://www.revistaei.cl/wp-json/wp/v2/posts?per_page=50",
         "url_rss": "https://www.revistaei.cl/feed/"
     },
     {
         "nombre": "ElectroMinería", 
-        "url_rss": "https://electromineria.cl/category/panorama-energetico/feed/"
-    },
-    {
-        "nombre": "ElectroMinería", 
+        "url_api": "https://electromineria.cl/wp-json/wp/v2/posts?per_page=50",
         "url_rss": "https://electromineria.cl/feed/"
     }
 ]
@@ -32,7 +29,7 @@ DB_NAME = "noticias_energia.db"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    "Accept": "application/json, text/xml, */*"
 }
 
 PALABRAS_EXCLUIR_EMPLEO = [
@@ -42,13 +39,13 @@ PALABRAS_EXCLUIR_EMPLEO = [
     "bolsa de trabajo", "oportunidad laboral"
 ]
 
-def inicializar_bd():
+def inicializar_bd(reset=False):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    # Borrado explícito inicial para limpiar la BD genérica previa
-    cursor.execute("DROP TABLE IF EXISTS noticias")
-    
+    if reset:
+        cursor.execute("DROP TABLE IF EXISTS noticias")
+        
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS noticias (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,6 +61,7 @@ def inicializar_bd():
             procesado_el TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute("DELETE FROM noticias WHERE LOWER(titulo) LIKE '%ofertas de empleo%' OR LOWER(titulo) LIKE '%vacantes%'")
     conn.commit()
     conn.close()
 
@@ -89,17 +87,76 @@ def es_oferta_empleo(titulo, texto):
     contenido = f"{titulo} {texto}".lower()
     return any(palabra in contenido for palabra in PALABRAS_EXCLUIR_EMPLEO)
 
+def deducir_categoria(titulo, texto):
+    contenido = f"{titulo} {texto}".lower()
+    if any(k in contenido for k in ["bess", "almacenamiento", "batería", "baterias"]):
+        return "Almacenamiento (BESS)"
+    elif any(k in contenido for k in ["transmisión", "transmision", "línea", "subestación"]):
+        return "Transmisión"
+    elif any(k in contenido for k in ["cne", "coordinador", "regulación", "norma", "ley", "decreto"]):
+        return "Regulación/Normativa"
+    elif any(k in contenido for k in ["pmgd", "distribución", "distribucion"]):
+        return "PMGD/Distribución"
+    elif any(k in contenido for k in ["hidrógeno", "hidrogeno", "descarbonización"]):
+        return "Hidrógeno Verde/Descarbonización"
+    elif any(k in contenido for k in ["precio", "spot", "cmg", "costo marginal", "tarifa"]):
+        return "Mercado Mayorista/Precios"
+    return "Generación/ERNC"
+
 def obtener_noticias():
     noticias_map = {}
     hace_30_dias = datetime.now(timezone.utc) - timedelta(days=30)
     
     for fuente in FUENTES:
-        print(f"📡 Consultando RSS: {fuente['nombre']} ({fuente['url_rss']})...")
+        print(f"📡 Consultando fuente: {fuente['nombre']}...")
+        
+        # 1. Consulta vía API WordPress REST
+        try:
+            resp = requests.get(fuente["url_api"], headers=HEADERS, timeout=15, verify=False)
+            if resp.status_code == 200:
+                posts = resp.json()
+                if isinstance(posts, list):
+                    print(f"   [API WP] {len(posts)} artículos obtenidos de {fuente['nombre']}.")
+                    for post in posts:
+                        titulo = limpiar_html(post.get("title", {}).get("rendered", ""))
+                        url_oficial = normalizar_url(post.get("link", ""))
+                        
+                        if not url_oficial or es_oferta_empleo(titulo, ""):
+                            continue
+
+                        date_str = post.get("date_gmt", "") or post.get("date", "")
+                        fecha_dt = datetime.now(timezone.utc)
+                        if date_str:
+                            date_clean = re.sub(r'\.\d+', '', date_str.replace("Z", ""))
+                            for fmt in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"]:
+                                try:
+                                    fecha_dt = datetime.strptime(date_clean, fmt).replace(tzinfo=timezone.utc)
+                                    break
+                                except ValueError:
+                                    pass
+
+                        if fecha_dt < hace_30_dias:
+                            continue
+
+                        texto_limpio = limpiar_html(post.get("content", {}).get("rendered", ""))
+                        
+                        if titulo and url_oficial not in noticias_map:
+                            noticias_map[url_oficial] = {
+                                "fuente": fuente["nombre"],
+                                "titulo": titulo,
+                                "url": url_oficial,
+                                "fecha": fecha_dt.strftime('%Y-%m-%d %H:%M:%S'),
+                                "texto": texto_limpio
+                            }
+        except Exception as e:
+            print(f"   ⚠️ Error API WP ({fuente['nombre']}): {e}")
+
+        # 2. Respaldo vía Feed RSS
         try:
             resp_rss = requests.get(fuente["url_rss"], headers=HEADERS, timeout=15, verify=False)
             if resp_rss.status_code == 200:
                 feed = feedparser.parse(resp_rss.content)
-                print(f"   [RSS] {len(feed.entries)} artículos detectados.")
+                print(f"   [RSS] {len(feed.entries)} artículos obtenidos de {fuente['nombre']}.")
                 for entry in feed.entries:
                     titulo = getattr(entry, 'title', '').strip()
                     url_oficial = normalizar_url(getattr(entry, 'link', ''))
@@ -130,7 +187,7 @@ def obtener_noticias():
                             "texto": limpiar_html(content_raw)
                         }
         except Exception as e:
-            print(f"   ⚠️ Error en RSS para {fuente['nombre']}: {e}")
+            print(f"   ⚠️ Error RSS ({fuente['nombre']}): {e}")
 
     return list(noticias_map.values())
 
@@ -138,37 +195,50 @@ def analizar_con_llm(titulo, texto, fuente):
     if es_oferta_empleo(titulo, texto):
         return {"es_relevante": False}
 
+    cat_fallback = deducir_categoria(titulo, texto)
+    fallback_res = {
+        "es_relevante": True,
+        "categoria": cat_fallback,
+        "resumen_ejecutivo": (texto[:220] + "...") if len(texto) > 50 else titulo,
+        "impacto_mercado": "Medio",
+        "actores_mencionados": [],
+        "sentimiento": "Neutro"
+    }
+
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        print("❌ GEMINI_API_KEY no configurada.")
-        return None
+        print("⚠️ GEMINI_API_KEY no encontrada. Usando análisis de respaldo.")
+        return fallback_res
 
     client = genai.Client(api_key=api_key)
     
     prompt = f"""
-    Eres un analista experto del mercado eléctrico chileno.
-    Analiza la noticia publicada en {fuente}:
+    Eres un analista experto en el mercado eléctrico chileno.
+    Analiza técnicamente el siguiente artículo publicado en {fuente}:
     
     Título: {titulo}
     Texto: {texto[:2500]}
     
-    SI ES OFERTA DE EMPLEO O PUBLICIDAD, RESPONDE STRICTAMENTE: {{"es_relevante": false}}
+    SI ES OFERTA DE EMPLEO, AVISO LABORAL O PUBLICIDAD, RESPONDE STRICTAMENTE:
+    {{"es_relevante": false}}
 
-    CLASIFICACIÓN OBLIGATORIA DE "impacto_mercado":
-    - "Alto": Proyectos >US$ 50M o >100 MW (BESS, Transmisión, ERNC), decretos/resoluciones de CNE, Coordinador Eléctrico o Ministerio, alzas tarifarias, vertimientos masivos o insolvencias.
-    - "Medio": Posicionamiento/cuestionamientos de gremios (Acenor, Generadoras, ACERA), proyectos PMGD, hitos de obra, contratos PPA, aprobaciones ambientales.
-    - "Bajo": Nombramientos de ejecutivos, eventos, ferias, premiaciones, RSE.
+    CLASIFICACIÓN DE "impacto_mercado":
+    - "Alto": Proyectos >US$ 50M o >100 MW (BESS, Transmisión, ERNC), decretos/resoluciones de CNE/Coordinador Eléctrico/Ministerio, alzas tarifarias, vertimientos masivos o insolvencias.
+    - "Medio": Declaraciones/estudios de gremios (Acenor, Generadoras, ACERA), proyectos PMGD, hitos de obra, contratos PPA, aprobaciones ambientales.
+    - "Bajo": Nombramientos corporativos, eventos, ferias, premiaciones, RSE.
 
     Responde ÚNICAMENTE en JSON estricto con la siguiente estructura:
     1. "es_relevante": true
     2. "categoria": Selección estricta entre ["Transmisión", "Almacenamiento (BESS)", "Generación/ERNC", "Regulación/Normativa", "Mercado Mayorista/Precios", "PMGD/Distribución", "Hidrógeno Verde/Descarbonización"].
-    3. "resumen_ejecutivo": Un párrafo técnico de 2-3 oraciones sintetizando el impacto real.
-    4. "impacto_mercado": Evalúa rigurosamente si es "Alto", "Medio" o "Bajo".
-    5. "actores_mencionados": Lista de cadenas con los nombres exactos de empresas u organismos citados (ej. ["Acenor", "CNE", "Coordinador Eléctrico"]).
+    3. "resumen_ejecutivo": Párrafo técnico de 2-3 oraciones sintetizando el impacto real.
+    4. "impacto_mercado": "Alto", "Medio" o "Bajo".
+    5. "actores_mencionados": Lista con nombres exactos de empresas u organismos citados (ej. ["Acenor", "CNE", "Coordinador Eléctrico", "Enel"]).
     6. "sentimiento": Elige entre ["Positivo", "Neutro", "Riesgo/Negativo"].
     """
 
-    for model_name in ["gemini-2.0-flash", "gemini-1.5-flash"]:
+    modelos_a_probar = ["gemini-3.6-flash"]
+    
+    for model_name in modelos_a_probar:
         try:
             response = client.models.generate_content(
                 model=model_name,
@@ -182,23 +252,23 @@ def analizar_con_llm(titulo, texto, fuente):
                 if isinstance(res_json, dict) and "categoria" in res_json:
                     return res_json
         except Exception as e:
-            print(f"⚠️ Error modelo {model_name}: {e}")
+            print(f"⚠️ Error Gemini ({model_name}): {e}")
             continue
 
-    return None
+    return fallback_res
 
 def ejecutar_agente():
-    inicializar_bd()
+    inicializar_bd(reset=False)
     
     noticias = obtener_noticias()
-    print(f"\n📰 Total de noticias únicas recuperadas para procesar: {len(noticias)}")
+    print(f"\n📰 Total de noticias únicas recuperadas: {len(noticias)}")
     
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
     noticias_guardadas = 0
     for item in noticias:
-        url_oficial = normalizar_url(item["url"])
+        url_oficial = item["url"]
         
         cursor.execute("SELECT id FROM noticias WHERE url = ?", (url_oficial,))
         if cursor.fetchone():
