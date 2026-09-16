@@ -7,15 +7,14 @@ import re
 from datetime import datetime, timedelta, timezone
 from google import genai
 
-# Fuentes configuradas con la API REST nativa de WordPress
 FUENTES = [
     {
         "nombre": "Revista EI", 
-        "url_api": "https://www.revistaei.cl/wp-json/wp/v2/posts?per_page=20"
+        "url_api": "https://www.revistaei.cl/wp-json/wp/v2/posts"
     },
     {
         "nombre": "ElectroMinería", 
-        "url_api": "https://www.electromineria.cl/wp-json/wp/v2/posts?per_page=20"
+        "url_api": "https://www.electromineria.cl/wp-json/wp/v2/posts"
     }
 ]
 
@@ -60,43 +59,61 @@ def obtener_noticias_wp_api():
     noticias = []
     hace_30_dias = datetime.now(timezone.utc) - timedelta(days=30)
     
+    # Consultamos tanto entradas estándar como tipos de contenido adicionales
+    endpoints = ["posts", "noticias", "reportajes"]
+    
     for fuente in FUENTES:
         print(f"📡 Consultando API de {fuente['nombre']}...")
-        try:
-            resp = requests.get(fuente["url_api"], headers=HEADERS, timeout=15)
-            if resp.status_code == 200:
-                posts = resp.json()
-                print(f"   Artículos recibidos: {len(posts)}")
+        base_url = fuente["url_api"].rsplit("/posts", 1)[0]
+        urls_procesadas_en_ejecucion = set()
+        
+        for ep in endpoints:
+            url_consulta = f"{base_url}/{ep}?per_page=30"
+            try:
+                resp = requests.get(url_consulta, headers=HEADERS, timeout=15)
+                if resp.status_code == 200:
+                    posts = resp.json()
+                    if isinstance(posts, list):
+                        print(f"   Subsección '{ep}': {len(posts)} artículos encontrados.")
+                        for post in posts:
+                            titulo = limpiar_html(post.get("title", {}).get("rendered", ""))
+                            # Normalización de URL para evitar duplicados por '/' final
+                            url = post.get("link", "").strip().rstrip("/")
+                            
+                            if not url or url in urls_procesadas_en_ejecucion:
+                                continue
+                            urls_procesadas_en_ejecucion.add(url)
+                            
+                            date_str = post.get("date_gmt", "") or post.get("date", "")
+                            
+                            # Parser flexible de fecha ISO
+                            fecha_dt = datetime.now(timezone.utc)
+                            if date_str:
+                                date_clean = re.sub(r'\.\d+', '', date_str.replace("Z", ""))
+                                for fmt in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"]:
+                                    try:
+                                        fecha_dt = datetime.strptime(date_clean, fmt).replace(tzinfo=timezone.utc)
+                                        break
+                                    except ValueError:
+                                        pass
+                                        
+                            if fecha_dt < hace_30_dias:
+                                continue
+                                
+                            content_raw = post.get("content", {}).get("rendered", "") or post.get("excerpt", {}).get("rendered", "")
+                            texto_limpio = limpiar_html(content_raw)
+                            
+                            if titulo and url:
+                                noticias.append({
+                                    "fuente": fuente["nombre"],
+                                    "titulo": titulo,
+                                    "url": url,
+                                    "fecha": fecha_dt.strftime('%Y-%m-%d %H:%M:%S'),
+                                    "texto": texto_limpio
+                                })
+            except Exception as e:
+                print(f"   ⚠️ No se pudo consultar '{ep}' en {fuente['nombre']}: {e}")
                 
-                for post in posts:
-                    titulo = limpiar_html(post.get("title", {}).get("rendered", ""))
-                    url = post.get("link", "").strip()
-                    date_str = post.get("date_gmt", "")
-                    
-                    try:
-                        fecha_dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
-                    except:
-                        fecha_dt = datetime.now(timezone.utc)
-                        
-                    if fecha_dt < hace_30_dias:
-                        continue
-                        
-                    content_raw = post.get("content", {}).get("rendered", "")
-                    texto_limpio = limpiar_html(content_raw)
-                    
-                    if titulo and url:
-                        noticias.append({
-                            "fuente": fuente["nombre"],
-                            "titulo": titulo,
-                            "url": url,
-                            "fecha": fecha_dt.strftime('%Y-%m-%d %H:%M:%S'),
-                            "texto": texto_limpio
-                        })
-            else:
-                print(f"   ⚠️ Error en respuesta API: Código HTTP {resp.status_code}")
-        except Exception as e:
-            print(f"   ❌ Error conectando a API de {fuente['nombre']}: {e}")
-            
     return noticias
 
 def analizar_con_llm(titulo, texto, fuente):
@@ -146,7 +163,8 @@ def ejecutar_agente():
     
     noticias_guardadas = 0
     for item in noticias:
-        cursor.execute("SELECT id FROM noticias WHERE url = ?", (item["url"],))
+        # Consulta flexible que revisa la URL tanto con como sin '/' final
+        cursor.execute("SELECT id FROM noticias WHERE url = ? OR url = ?", (item["url"], item["url"] + "/"))
         if cursor.fetchone():
             print(f"⏭️ Ya existe en BD: {item['titulo'][:40]}...")
             continue
