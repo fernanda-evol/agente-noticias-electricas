@@ -122,29 +122,51 @@ def clasificar_localmente(titulo, texto):
         "sentimiento": "Neutro"
     }
 
+def _contenedor_propio_del_post(h2):
+    """Sube por los ancestros de un <h2> hasta encontrar el contenedor que
+    envuelve SOLO esa noticia (no toda la lista). Se detecta sin depender del
+    nombre de la clase CSS del tema: el contenedor correcto es el último
+    ancestro que sigue teniendo un único <h2> adentro — apenas un ancestro
+    tiene más de uno, ya nos pasamos al bloque que agrupa varias noticias."""
+    candidato = h2.parent
+    anterior = h2
+    for _ in range(8):
+        if candidato is None:
+            break
+        if len(candidato.find_all("h2")) > 1:
+            break
+        anterior = candidato
+        candidato = candidato.parent
+    return anterior
+
+
+def _extraer_bajada(contenedor, titulo):
+    """Primer párrafo con contenido real dentro del contenedor de la noticia
+    (evita reventar categoría/fecha/"Leer más", que son muy cortos)."""
+    for p in contenedor.find_all("p"):
+        texto = p.get_text(" ", strip=True)
+        if len(texto) > 25 and texto.lower() != titulo.lower():
+            return texto
+    return ""
+
+
 def obtener_texto_y_fecha_articulo(session, url, max_chars=4000):
-    """Descarga el cuerpo y la fecha real de publicación de un artículo.
-    Se usa tanto para enriquecer el HTML de categoría (que no trae el cuerpo
-    completo) como el RSS (que solo trae una oración de descripción)."""
+    """Descarga SOLO la fecha real de publicación desde el meta tag del
+    artículo. (El cuerpo del artículo ya no se usa como fuente de resumen:
+    el selector genérico de respaldo terminaba agarrando bloques de
+    "artículos relacionados" del tema y mezclando resúmenes entre noticias.
+    Ver obtener_electromineria_categoria, que ahora saca la bajada del
+    propio listado de la categoría.)"""
     fecha_default = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     try:
         resp = get_con_resiliencia(session, url, timeout=15)
         if resp is None:
-            return "", fecha_default
+            return fecha_default
         soup = BeautifulSoup(resp.text, "html.parser")
-
         meta_fecha = soup.find("meta", property="article:published_time")
-        fecha = meta_fecha["content"] if meta_fecha and meta_fecha.get("content") else fecha_default
-
-        contenedor = soup.select_one("div.entry-content") or soup.select_one("article")
-        texto = ""
-        if contenedor:
-            for tag in contenedor.select("script, style"):
-                tag.decompose()
-            texto = re.sub(r'\s+', ' ', contenedor.get_text(separator=" ")).strip()[:max_chars]
-        return texto, fecha
+        return meta_fecha["content"] if meta_fecha and meta_fecha.get("content") else fecha_default
     except Exception:
-        return "", fecha_default
+        return fecha_default
 
 
 CATEGORIA_ENERGIA_URL = "https://electromineria.cl/category/panorama-energetico/"
@@ -154,8 +176,10 @@ def obtener_electromineria_categoria(session, limite=25):
     """Extrae noticias directamente del listado de la categoría 'Panorama
     Energético' — la sección específica de energía del sitio (a diferencia
     del RSS general, que mezcla noticias de minería con las de energía).
-    Es la fuente principal: se confirmó que responde HTTP 200 con contenido
-    real y actualizado, sin depender del REST API filtrado."""
+    La bajada de cada noticia se saca del propio bloque del listado (no de
+    visitar cada artículo), así queda garantizado que no se mezcla con la de
+    otra noticia. Solo se visita el artículo individual para confirmar la
+    fecha exacta de publicación."""
     try:
         resp = get_con_resiliencia(session, CATEGORIA_ENERGIA_URL, timeout=20)
         if resp is None:
@@ -163,15 +187,21 @@ def obtener_electromineria_categoria(session, limite=25):
             return []
         soup = BeautifulSoup(resp.text, "html.parser")
         vistos, noticias = set(), []
-        for h2 in soup.select("h2 a[href]"):
-            url = h2.get("href", "").strip()
-            titulo = h2.get_text(strip=True)
+        for h2 in soup.select("h2"):
+            a = h2.find("a", href=True)
+            if not a:
+                continue
+            url = a.get("href", "").strip()
+            titulo = a.get_text(strip=True)
             if not (url.startswith("https://electromineria.cl/") and titulo):
                 continue
             if "/category/" in url or "/tag/" in url or url in vistos:
                 continue
             vistos.add(url)
-            texto, fecha_pub = obtener_texto_y_fecha_articulo(session, url)
+
+            contenedor = _contenedor_propio_del_post(h2)
+            texto = _extraer_bajada(contenedor, titulo)
+            fecha_pub = obtener_texto_y_fecha_articulo(session, url)
             noticias.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": texto, "fecha": fecha_pub})
             if len(noticias) >= limite:
                 break
@@ -191,13 +221,18 @@ def obtener_electromineria_via_html(session, limite=20):
             return []
         soup = BeautifulSoup(resp.text, "html.parser")
         vistos, noticias = set(), []
-        for h2 in soup.select("h2 a[href]"):
-            url = h2.get("href", "").strip()
-            titulo = h2.get_text(strip=True)
+        for h2 in soup.select("h2"):
+            a = h2.find("a", href=True)
+            if not a:
+                continue
+            url = a.get("href", "").strip()
+            titulo = a.get_text(strip=True)
             if not (url.startswith("https://electromineria.cl/") and titulo) or url in vistos:
                 continue
             vistos.add(url)
-            texto, fecha_pub = obtener_texto_y_fecha_articulo(session, url)
+            contenedor = _contenedor_propio_del_post(h2)
+            texto = _extraer_bajada(contenedor, titulo)
+            fecha_pub = obtener_texto_y_fecha_articulo(session, url)
             noticias.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": texto, "fecha": fecha_pub})
             if len(noticias) >= limite:
                 break
@@ -259,10 +294,9 @@ def obtener_noticias():
                     url = getattr(entry, 'link', '').strip()
                     if not (titulo and url):
                         continue
-                    texto, fecha_pub = obtener_texto_y_fecha_articulo(session_em, url)
-                    if not texto:
-                        content_raw = entry.content[0].value if "content" in entry and len(entry.content) > 0 else getattr(entry, 'summary', '')
-                        texto = limpiar_html(content_raw)
+                    fecha_pub = obtener_texto_y_fecha_articulo(session_em, url)
+                    content_raw = entry.content[0].value if "content" in entry and len(entry.content) > 0 else getattr(entry, 'summary', '')
+                    texto = limpiar_html(content_raw)
                     noticias_em.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": texto, "fecha": fecha_pub})
             except Exception as e:
                 print(f"Error parseando RSS ElectroMinería: {e}")
