@@ -24,6 +24,8 @@ jobs:
           pip install -r requirements.txt
 
       - name: Reparar fechas
+        env:
+          SCRAPERAPI_KEY: ${{ secrets.SCRAPERAPI_KEY }}
         run: python reparar_fechas_electromineria.py
 
       - name: Guardar cambios en la Base de Datos
