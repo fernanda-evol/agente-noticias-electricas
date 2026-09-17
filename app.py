@@ -181,3 +181,27 @@ else:
                     <div style="background-color: #eaf6fc; padding: 12px; border-left: 4px solid {AZUL_OSCURO}; margin-bottom: 10px; font-size: 14px;">
                         💡 <b>Resumen Ejecutivo:</b> {row['resumen_ejecutivo']}
                     </div>
+                    <p style="font-size: 13px; color: #424242; margin-bottom: 5px;">
+                        🏛️ <b>Actores / Empresas:</b> {actores_str} &nbsp;|&nbsp; 📊 <b>Sentimiento:</b> {row['sentimiento']}
+                    </p>
+                    <a href="{row['url']}" target="_blank" style="font-size: 13px; text-decoration: none; color: {AZUL_OSCURO}; font-weight: bold;">Leer artículo completo en {row['fuente']} →</a>
+                </div>
+                """, unsafe_allow_html=True)
+
+    with tab2:
+        st.subheader("Estadísticas del Mercado")
+        if not df_filtrado.empty:
+            col_g1, col_g2 = st.columns(2)
+            with col_g1:
+                st.write("**Distribución por Categoría**")
+                st.bar_chart(df_filtrado['categoria'].value_counts())
+            with col_g2:
+                st.write("**Distribución por Nivel de Impacto**")
+                st.bar_chart(df_filtrado['impacto_mercado'].value_counts())
+
+    with tab3:
+        st.subheader("Tabla de Datos Completa")
+        st.dataframe(
+            df_filtrado[['fecha_publicacion', 'fuente', 'categoria', 'impacto_mercado', 'titulo', 'url']],
+            use_container_width=True
+        )
