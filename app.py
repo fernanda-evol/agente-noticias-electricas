@@ -10,14 +10,47 @@ st.set_page_config(
     layout="wide"
 )
 
-# Estilos CSS para Badges y Tarjetas
-st.markdown("""
+# --- Paleta de marca EVOL ---
+AZUL_OSCURO = "#00629B"
+CELESTE = "#16A7E5"
+AMARILLO = "#FCDB00"
+
+# Colores clásicos para los niveles de impacto (se dejan aparte de la
+# paleta EVOL a propósito: rojo/amarillo/verde es un código universal de
+# alerta que conviene mantener, no reemplazarlo por los colores de marca).
+ROJO_IMPACTO = "#E53935"
+AMARILLO_IMPACTO = "#FBC02D"
+VERDE_IMPACTO = "#43A047"
+
+# Estilos CSS para Badges, Tarjetas y tipografía de marca (EVOL)
+st.markdown(f"""
 <style>
-    .badge-alto { background-color: #ff4b4b; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
-    .badge-medio { background-color: #ffa726; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
-    .badge-bajo { background-color: #66bb6a; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
-    .badge-cat { background-color: #e0f7fa; color: #006064; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
-    .card-news { background-color: #ffffff; padding: 18px; border-radius: 8px; border: 1px solid #e0e0e0; margin-bottom: 15px; }
+    /* Calibri es una fuente de Microsoft: en Streamlit Cloud (Linux) puede
+       no estar instalada y el navegador cae al siguiente disponible. Carlito
+       es un sustituto de código abierto métricamente compatible con Calibri
+       — así se ve igual aunque el visor no tenga Calibri instalada. */
+    html, body, [class*="css"], .stApp {{
+        font-family: 'Calibri', 'Carlito', sans-serif;
+    }}
+
+    .badge-alto {{ background-color: {ROJO_IMPACTO}; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }}
+    .badge-medio {{ background-color: {AMARILLO_IMPACTO}; color: #4a3b00; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }}
+    .badge-bajo {{ background-color: {VERDE_IMPACTO}; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }}
+    .badge-cat {{ background-color: #eaf6fc; color: {AZUL_OSCURO}; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }}
+    .card-news {{ background-color: #ffffff; padding: 18px; border-radius: 8px; border: 1px solid #e0e0e0; border-top: 3px solid {AZUL_OSCURO}; margin-bottom: 15px; }}
+
+    h1, h2, h3 {{ color: {AZUL_OSCURO}; }}
+    a {{ color: {AZUL_OSCURO}; }}
+
+    /* Métricas del dashboard (st.metric) */
+    [data-testid="stMetricValue"] {{ color: {AZUL_OSCURO}; }}
+
+    /* Pestañas activas */
+    .stTabs [aria-selected="true"] {{ color: {AZUL_OSCURO}; border-bottom-color: {AZUL_OSCURO} !important; }}
+
+    /* Botones */
+    .stButton > button {{ border-color: {AZUL_OSCURO}; color: {AZUL_OSCURO}; }}
+    .stButton > button:hover {{ border-color: {CELESTE}; color: {CELESTE}; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -145,30 +178,6 @@ else:
                     <span class="badge-cat">{row['categoria']}</span>
                     <span style="float: right; color: #757575; font-size: 13px;"><b>{row['fuente']}</b> | {fecha_corta}</span>
                     <h3 style="margin-top: 10px; margin-bottom: 10px;">{row['titulo']}</h3>
-                    <div style="background-color: #f5f5f5; padding: 12px; border-left: 4px solid #1976d2; margin-bottom: 10px; font-size: 14px;">
+                    <div style="background-color: #eaf6fc; padding: 12px; border-left: 4px solid {AZUL_OSCURO}; margin-bottom: 10px; font-size: 14px;">
                         💡 <b>Resumen Ejecutivo:</b> {row['resumen_ejecutivo']}
                     </div>
-                    <p style="font-size: 13px; color: #424242; margin-bottom: 5px;">
-                        🏛️ <b>Actores / Empresas:</b> {actores_str} &nbsp;|&nbsp; 📊 <b>Sentimiento:</b> {row['sentimiento']}
-                    </p>
-                    <a href="{row['url']}" target="_blank" style="font-size: 13px; text-decoration: none; color: #1976d2; font-weight: bold;">Leer artículo completo en {row['fuente']} →</a>
-                </div>
-                """, unsafe_allow_html=True)
-
-    with tab2:
-        st.subheader("Estadísticas del Mercado")
-        if not df_filtrado.empty:
-            col_g1, col_g2 = st.columns(2)
-            with col_g1:
-                st.write("**Distribución por Categoría**")
-                st.bar_chart(df_filtrado['categoria'].value_counts())
-            with col_g2:
-                st.write("**Distribución por Nivel de Impacto**")
-                st.bar_chart(df_filtrado['impacto_mercado'].value_counts())
-
-    with tab3:
-        st.subheader("Tabla de Datos Completa")
-        st.dataframe(
-            df_filtrado[['fecha_publicacion', 'fuente', 'categoria', 'impacto_mercado', 'titulo', 'url']],
-            use_container_width=True
-        )
