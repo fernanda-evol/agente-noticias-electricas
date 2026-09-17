@@ -354,22 +354,26 @@ def _extraer_bajada(contenedor, titulo):
 
 
 def obtener_texto_y_fecha_articulo(session, url, max_chars=4000):
-    """Descarga SOLO la fecha real de publicación desde el meta tag del
-    artículo. (El cuerpo del artículo ya no se usa como fuente de resumen:
-    el selector genérico de respaldo terminaba agarrando bloques de
-    "artículos relacionados" del tema y mezclando resúmenes entre noticias.
-    Ver obtener_electromineria_categoria, que ahora saca la bajada del
-    propio listado de la categoría.)"""
-    fecha_default = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    """Devuelve la fecha real de publicación desde el meta tag del artículo,
+    o None si no se pudo acceder a la página (falla transitoria de red o de
+    proxy). Cuando devuelve None, el llamador debe OMITIR esa noticia en
+    esta corrida en vez de guardarla con una fecha inventada — así se
+    reintenta sola en la próxima corrida, en vez de quedar contaminada para
+    siempre (el INSERT OR IGNORE por url nunca la revisaría de nuevo)."""
     try:
         resp = get_con_resiliencia(session, url, timeout=15)
         if resp is None:
-            return fecha_default
+            return None
         soup = BeautifulSoup(resp.text, "html.parser")
         meta_fecha = soup.find("meta", property="article:published_time")
-        return meta_fecha["content"] if meta_fecha and meta_fecha.get("content") else fecha_default
+        if meta_fecha and meta_fecha.get("content"):
+            return meta_fecha["content"]
+        # La página sí cargó, solo que no tiene ese meta tag puntual — no es
+        # una falla de acceso, así que acá sí vale usar el momento de
+        # extracción como mejor aproximación disponible.
+        return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     except Exception:
-        return fecha_default
+        return None
 
 
 CATEGORIA_ENERGIA_URL = "https://electromineria.cl/category/panorama-energetico/"
@@ -405,6 +409,9 @@ def obtener_electromineria_categoria(session, limite=25):
             contenedor = _contenedor_propio_del_post(h2)
             texto = _extraer_bajada(contenedor, titulo)
             fecha_pub = obtener_texto_y_fecha_articulo(session, url)
+            if fecha_pub is None:
+                print(f"  Fecha no confirmada para \"{titulo[:60]}\" (falla de acceso) — se omite esta corrida, se reintenta en la siguiente.")
+                continue
             noticias.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": texto, "fecha": fecha_pub})
             if len(noticias) >= limite:
                 break
@@ -436,6 +443,9 @@ def obtener_electromineria_via_html(session, limite=20):
             contenedor = _contenedor_propio_del_post(h2)
             texto = _extraer_bajada(contenedor, titulo)
             fecha_pub = obtener_texto_y_fecha_articulo(session, url)
+            if fecha_pub is None:
+                print(f"  Fecha no confirmada para \"{titulo[:60]}\" (falla de acceso) — se omite esta corrida, se reintenta en la siguiente.")
+                continue
             noticias.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": texto, "fecha": fecha_pub})
             if len(noticias) >= limite:
                 break
@@ -498,6 +508,14 @@ def obtener_noticias():
                     if not (titulo and url):
                         continue
                     fecha_pub = obtener_texto_y_fecha_articulo(session_em, url)
+                    if fecha_pub is None:
+                        # A diferencia de la categoría/home, acá sí hay un
+                        # respaldo legítimo: el propio RSS trae su fecha de
+                        # publicación (menos precisa, pero real, no inventada).
+                        fecha_pub = getattr(entry, 'published', None)
+                    if fecha_pub is None:
+                        print(f"  Fecha no confirmada para \"{titulo[:60]}\" (falla de acceso) — se omite esta corrida, se reintenta en la siguiente.")
+                        continue
                     content_raw = entry.content[0].value if "content" in entry and len(entry.content) > 0 else getattr(entry, 'summary', '')
                     texto = limpiar_html(content_raw)
                     noticias_em.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": texto, "fecha": fecha_pub})
