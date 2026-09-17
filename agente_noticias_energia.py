@@ -84,19 +84,23 @@ ACTORES_CANONICO_A_PALABRAS = {}
 for _palabra, _canonico in ACTORES_PALABRAS_CLAVE.items():
     ACTORES_CANONICO_A_PALABRAS.setdefault(_canonico, []).append(_palabra)
 
-# Proxies públicos de lectura (gratuitos). Se usan como respaldo cuando la
-# petición directa falla con 403/timeout — algo frecuente porque las IPs de
-# los runners de GitHub Actions son rangos de datacenter conocidos que varios
-# WAFs (Wordfence, Sucuri, Cloudflare) bloquean por defecto. El proxy hace la
-# petición desde su propia IP y nos devuelve el HTML/XML crudo tal cual.
-# Son servicios gratuitos sin garantía de disponibilidad, por eso hay dos en
-# cascada y cada uno se reintenta antes de pasar al siguiente. (corsproxy.io
-# quedó afuera: desde hace poco exige API key paga para cualquier uso que no
-# sea localhost, así que nunca va a funcionar desde un runner de Actions.)
-PROXIES_LECTURA = [
-    "https://api.allorigins.win/raw?url={url}",
-    "https://api.codetabs.com/v1/proxy?quest={url}",
-]
+# Proxies de lectura, en cascada. ScraperAPI (si hay API key configurada) va
+# primero: tiene infraestructura dedicada y capa gratuita de 1.000
+# peticiones/mes, mucho más confiable que los servicios comunitarios
+# gratuitos que van después como respaldo adicional sin costo.
+SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY", "").strip()
+
+
+def _construir_lista_proxies():
+    proxies = []
+    if SCRAPERAPI_KEY:
+        proxies.append(f"http://api.scraperapi.com/?api_key={SCRAPERAPI_KEY}&url={{url}}")
+    proxies.append("https://api.allorigins.win/raw?url={url}")
+    proxies.append("https://api.codetabs.com/v1/proxy?quest={url}")
+    return proxies
+
+
+PROXIES_LECTURA = _construir_lista_proxies()
 
 REINTENTOS_POR_PROXY = 2
 ESPERA_ENTRE_REINTENTOS = 3
