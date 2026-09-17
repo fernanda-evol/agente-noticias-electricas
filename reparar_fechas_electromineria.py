@@ -1,4 +1,4 @@
-n#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 reparar_fechas_electromineria.py
 =================================
