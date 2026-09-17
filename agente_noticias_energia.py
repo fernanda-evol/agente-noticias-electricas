@@ -43,6 +43,20 @@ CATEGORIAS_VALIDAS = [
 IMPACTOS_VALIDOS = ["Alto", "Medio", "Bajo"]
 SENTIMIENTOS_VALIDOS = ["Positivo", "Negativo", "Neutro"]
 
+# Catálogo de actores de referencia del mercado eléctrico chileno. No es una
+# lista cerrada (Gemini puede mencionar otros actores relevantes que
+# aparezcan en la noticia), pero asegura que reconozca y use el nombre
+# canónico de estos, incluso si el artículo los menciona de forma indirecta
+# (p. ej. "el Coordinador" -> "Coordinador Eléctrico Nacional").
+ACTORES_REFERENCIA = """
+Instituciones del sector: CNE (Comisión Nacional de Energía), CEN / Coordinador Eléctrico Nacional, SEA (Servicio de Evaluación Ambiental), SEIA, Panel de Expertos, SEC (Superintendencia de Electricidad y Combustibles)
+Gremios: ACERA, ACENOR, ACEN, ANESCO, WEC, ACESOL, GIE, EEAG, Generadoras de Chile, Transmisoras de Chile, Chile Data Center
+Big4 (generadoras principales): Enel, Engie, AES (AES Andes), Colbún
+Otras generadoras/comercializadoras: Grenergy, Atlas Renewable Energy, Zelestra, Lipigas, EVOL, EMOAC, Cinergia, GM / Generadora Metropolitana
+Transmisión: Transelec, ISA
+Distribución: Enel Distribución, Chilquinta, CGE
+"""
+
 # Proxies públicos de lectura (gratuitos). Se usan como respaldo cuando la
 # petición directa falla con 403/timeout — algo frecuente porque las IPs de
 # los runners de GitHub Actions son rangos de datacenter conocidos que varios
@@ -144,11 +158,21 @@ def clasificar_localmente(titulo, texto):
         impacto = "Bajo"
 
     actores = []
-    if "acenor" in contenido: actores.append("Acenor")
-    if "cne" in contenido: actores.append("CNE")
-    if "coordinador" in contenido: actores.append("Coordinador Eléctrico")
-    if "enel" in contenido: actores.append("Enel")
-    if "colbún" in contenido or "colbun" in contenido: actores.append("Colbún")
+    actores_reglas = {
+        "cne": "CNE", "coordinador": "Coordinador Eléctrico Nacional",
+        "panel de expertos": "Panel de Expertos", "sec": "SEC",
+        "sea": "SEA", "seia": "SEIA",
+        "acera": "ACERA", "acenor": "ACENOR", "anesco": "ANESCO",
+        "generadoras de chile": "Generadoras de Chile", "transmisoras de chile": "Transmisoras de Chile",
+        "enel": "Enel", "engie": "Engie", "aes": "AES Andes", "colbún": "Colbún", "colbun": "Colbún",
+        "grenergy": "Grenergy", "atlas renewable": "Atlas Renewable Energy", "zelestra": "Zelestra",
+        "lipigas": "Lipigas", "evol": "EVOL", "emoac": "EMOAC", "cinergia": "Cinergia",
+        "transelec": "Transelec", "isa": "ISA",
+        "chilquinta": "Chilquinta", "cge": "CGE",
+    }
+    for clave, nombre_canonico in actores_reglas.items():
+        if clave in contenido and nombre_canonico not in actores:
+            actores.append(nombre_canonico)
 
     return {
         "categoria": cat,
@@ -195,9 +219,19 @@ def clasificar_con_gemini(client, titulo, texto, contador_llamadas):
         f"Título: {titulo}\n"
         f"Contenido: {texto[:3000]}\n\n"
         "resumen_ejecutivo: máximo 40 palabras, en español, con la información "
-        "más relevante para un analista comercial del mercado eléctrico.\n"
-        "actores_mencionados: nombres de empresas u organismos mencionados "
-        "explícitamente (lista vacía si no hay ninguno claro)."
+        "más relevante para un analista comercial del mercado eléctrico.\n\n"
+        "actores_mencionados: identifica TODOS los actores del mercado eléctrico "
+        "chileno mencionados en el título o el contenido, incluso si aparecen "
+        "solo de forma indirecta o abreviada (por ejemplo, \"el Coordinador\" "
+        "debe registrarse como \"Coordinador Eléctrico Nacional\"). Usa siempre "
+        "el nombre oficial o más reconocible del actor, no la forma abreviada "
+        "tal como aparece en el texto. Estos son los actores de referencia más "
+        "relevantes para este análisis (la lista no es cerrada: si aparece un "
+        "actor del sector eléctrico chileno que no está aquí, inclúyelo igual "
+        "con su nombre más reconocible):\n"
+        f"{ACTORES_REFERENCIA}\n"
+        "Si ninguno de estos ni otro actor del sector aparece mencionado, "
+        "devuelve una lista vacía."
     )
 
     max_reintentos = 3
