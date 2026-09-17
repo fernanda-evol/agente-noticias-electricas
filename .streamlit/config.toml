@@ -1,0 +1,7 @@
+[theme]
+# Paleta de marca EVOL aplicada a los widgets nativos de Streamlit
+primaryColor = "#00629B"
+backgroundColor = "#F5FAFD"
+secondaryBackgroundColor = "#EAF6FC"
+textColor = "#1A1A2E"
+font = "sans serif"
