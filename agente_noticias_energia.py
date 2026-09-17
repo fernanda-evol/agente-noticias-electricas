@@ -57,6 +57,33 @@ Transmisión: Transelec, ISA
 Distribución: Enel Distribución, Chilquinta, CGE
 """
 
+# Mismo catálogo, pero como diccionario palabra-clave -> nombre canónico.
+# Se usa en dos lugares: (1) las reglas locales de respaldo, y (2) para
+# VALIDAR de forma determinística lo que devuelve Gemini — un actor que
+# Gemini reporte pero cuya palabra clave no esté en el texto real de la
+# noticia se descarta, sin excepción (ver _validar_actores_gemini).
+ACTORES_PALABRAS_CLAVE = {
+    "cne": "CNE", "comisión nacional de energía": "CNE",
+    "coordinador": "Coordinador Eléctrico Nacional",
+    "panel de expertos": "Panel de Expertos",
+    "sec": "SEC", "superintendencia de electricidad": "SEC",
+    "sea": "SEA", "servicio de evaluación ambiental": "SEA",
+    "seia": "SEIA", "sistema de evaluación de impacto ambiental": "SEIA",
+    "acera": "ACERA", "acenor": "ACENOR",
+    "clientes eléctricos no regulados": "ACENOR", "anesco": "ANESCO",
+    "generadoras de chile": "Generadoras de Chile", "transmisoras de chile": "Transmisoras de Chile",
+    "enel": "Enel", "engie": "Engie", "aes": "AES Andes", "colbún": "Colbún", "colbun": "Colbún",
+    "grenergy": "Grenergy", "atlas renewable": "Atlas Renewable Energy", "zelestra": "Zelestra",
+    "lipigas": "Lipigas", "evol": "EVOL", "emoac": "EMOAC", "cinergia": "Cinergia",
+    "transelec": "Transelec", "isa": "ISA",
+    "chilquinta": "Chilquinta", "cge": "CGE",
+}
+
+# Mapeo inverso: nombre canónico -> lista de palabras clave que lo validan.
+ACTORES_CANONICO_A_PALABRAS = {}
+for _palabra, _canonico in ACTORES_PALABRAS_CLAVE.items():
+    ACTORES_CANONICO_A_PALABRAS.setdefault(_canonico, []).append(_palabra)
+
 # Proxies públicos de lectura (gratuitos). Se usan como respaldo cuando la
 # petición directa falla con 403/timeout — algo frecuente porque las IPs de
 # los runners de GitHub Actions son rangos de datacenter conocidos que varios
@@ -158,20 +185,8 @@ def clasificar_localmente(titulo, texto):
         impacto = "Bajo"
 
     actores = []
-    actores_reglas = {
-        "cne": "CNE", "coordinador": "Coordinador Eléctrico Nacional",
-        "panel de expertos": "Panel de Expertos", "sec": "SEC",
-        "sea": "SEA", "seia": "SEIA",
-        "acera": "ACERA", "acenor": "ACENOR", "anesco": "ANESCO",
-        "generadoras de chile": "Generadoras de Chile", "transmisoras de chile": "Transmisoras de Chile",
-        "enel": "Enel", "engie": "Engie", "aes": "AES Andes", "colbún": "Colbún", "colbun": "Colbún",
-        "grenergy": "Grenergy", "atlas renewable": "Atlas Renewable Energy", "zelestra": "Zelestra",
-        "lipigas": "Lipigas", "evol": "EVOL", "emoac": "EMOAC", "cinergia": "Cinergia",
-        "transelec": "Transelec", "isa": "ISA",
-        "chilquinta": "Chilquinta", "cge": "CGE",
-    }
-    for clave, nombre_canonico in actores_reglas.items():
-        if clave in contenido and nombre_canonico not in actores:
+    for clave, nombre_canonico in ACTORES_PALABRAS_CLAVE.items():
+        if _contiene_palabra(contenido, clave) and nombre_canonico not in actores:
             actores.append(nombre_canonico)
 
     return {
@@ -188,6 +203,31 @@ class CuotaGeminiAgotada(Exception):
     corrida. El llamador debe dejar de intentar con Gemini y usar reglas
     locales para el resto de las noticias, sin seguir insistiendo."""
     pass
+
+
+def _contiene_palabra(contenido, palabra):
+    """Coincidencia por palabra completa (no substring): evita falsos
+    positivos como que la sigla "SEA" se dé por encontrada dentro de la
+    palabra "sean"."""
+    return re.search(r'\b' + re.escape(palabra) + r'\b', contenido) is not None
+
+
+def _validar_actores_gemini(actores, titulo, texto):
+    """Filtro determinístico de hechos: descarta cualquier actor que Gemini
+    haya devuelto pero cuya palabra clave no esté realmente en el texto de
+    ESTA noticia. No depende de que el modelo siga la instrucción del
+    prompt al pie de la letra — es una verificación en código, siempre se
+    aplica. Un actor fuera del catálogo de referencia (nombre propio que
+    Gemini identificó por su cuenta) se valida buscando su propio nombre
+    como texto en el contenido."""
+    contenido = f"{titulo} {texto}".lower()
+    validados = []
+    for actor in actores:
+        palabras_clave = ACTORES_CANONICO_A_PALABRAS.get(actor, [actor.lower()])
+        if any(_contiene_palabra(contenido, palabra) for palabra in palabras_clave):
+            if actor not in validados:
+                validados.append(actor)
+    return validados
 
 
 def _esquema_analisis_gemini():
@@ -273,11 +313,13 @@ def clasificar_con_gemini(client, titulo, texto, contador_llamadas):
         impacto = resultado.get("impacto_mercado")
         sentimiento = resultado.get("sentimiento")
         actores = resultado.get("actores_mencionados")
+        actores = actores if isinstance(actores, list) else []
+        actores_validados = _validar_actores_gemini(actores, titulo, texto)
         return {
             "categoria": categoria if categoria in CATEGORIAS_VALIDAS else "Generación/ERNC",
             "resumen_ejecutivo": (resultado.get("resumen_ejecutivo") or titulo)[:400],
             "impacto_mercado": impacto if impacto in IMPACTOS_VALIDOS else "Medio",
-            "actores_mencionados": actores if isinstance(actores, list) else [],
+            "actores_mencionados": actores_validados,
             "sentimiento": sentimiento if sentimiento in SENTIMIENTOS_VALIDOS else "Neutro",
         }
 
