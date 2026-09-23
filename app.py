@@ -118,13 +118,21 @@ else:
     df_filtrado = df.copy()
 
     if isinstance(rango_fechas, (list, tuple)):
+        # Las noticias con fecha en blanco (fecha_dt es NaT — no se pudo
+        # confirmar la fecha real) no se excluyen por el filtro de rango:
+        # no tiene sentido "filtrarlas fuera" de un rango cuando justamente
+        # no sabemos a qué fecha pertenecen. Quedan siempre visibles.
         if len(rango_fechas) == 2:
             df_filtrado = df_filtrado[
-                (df_filtrado['fecha_dt'].dt.date >= rango_fechas[0]) & 
-                (df_filtrado['fecha_dt'].dt.date <= rango_fechas[1])
+                df_filtrado['fecha_dt'].isna() |
+                ((df_filtrado['fecha_dt'].dt.date >= rango_fechas[0]) &
+                 (df_filtrado['fecha_dt'].dt.date <= rango_fechas[1]))
             ]
         elif len(rango_fechas) == 1:
-            df_filtrado = df_filtrado[df_filtrado['fecha_dt'].dt.date == rango_fechas[0]]
+            df_filtrado = df_filtrado[
+                df_filtrado['fecha_dt'].isna() |
+                (df_filtrado['fecha_dt'].dt.date == rango_fechas[0])
+            ]
 
     if fuentes_sel:
         df_filtrado = df_filtrado[df_filtrado['fuente'].isin(fuentes_sel)]
