@@ -43,6 +43,24 @@ CATEGORIAS_VALIDAS = [
 IMPACTOS_VALIDOS = ["Alto", "Medio", "Bajo"]
 SENTIMIENTOS_VALIDOS = ["Positivo", "Negativo", "Neutro"]
 
+# Filtro rápido de irrelevancia: contenido que menciona empresas del sector
+# pero no es información de mercado (avisos de empleo, eventos corporativos
+# genéricos, premios). Se aplica ANTES de gastar una llamada a Gemini — si
+# una noticia cae acá, ni siquiera se guarda en la base.
+PATRONES_IRRELEVANTES = [
+    "oportunidades laborales", "buscando empleo", "bolsa de empleo",
+    "bolsa de trabajo", "portal de empleos", "postula aquí", "postula ahora",
+    "vacantes disponibles", "trabaja con nosotros", "ofertas de trabajo",
+    "se encuentra contratando", "únete a nuestro equipo", "nuevas vacantes",
+]
+
+
+def es_noticia_irrelevante(titulo, texto):
+    """True si la noticia claramente no es información de mercado (p. ej.
+    un aviso de empleo), aunque mencione una empresa del sector."""
+    contenido = f"{titulo} {texto}".lower()
+    return any(patron in contenido for patron in PATRONES_IRRELEVANTES)
+
 # Catálogo de actores de referencia del mercado eléctrico chileno. No es una
 # lista cerrada (Gemini puede mencionar otros actores relevantes que
 # aparezcan en la noticia), pero asegura que reconozca y use el nombre
@@ -238,13 +256,14 @@ def _esquema_analisis_gemini():
     return {
         "type": "object",
         "properties": {
+            "es_relevante": {"type": "boolean"},
             "categoria": {"type": "string", "enum": CATEGORIAS_VALIDAS},
             "resumen_ejecutivo": {"type": "string"},
             "impacto_mercado": {"type": "string", "enum": IMPACTOS_VALIDOS},
             "actores_mencionados": {"type": "array", "items": {"type": "string"}},
             "sentimiento": {"type": "string", "enum": SENTIMIENTOS_VALIDOS},
         },
-        "required": ["categoria", "resumen_ejecutivo", "impacto_mercado", "actores_mencionados", "sentimiento"],
+        "required": ["es_relevante", "categoria", "resumen_ejecutivo", "impacto_mercado", "actores_mencionados", "sentimiento"],
     }
 
 
@@ -259,6 +278,13 @@ def clasificar_con_gemini(client, titulo, texto, contador_llamadas):
     prompt = (
         "Eres un analista del mercado eléctrico chileno. Analiza la siguiente "
         "noticia y responde solo con el JSON solicitado, sin texto adicional ni markdown.\n\n"
+        "es_relevante: false si el contenido NO es información real de mercado "
+        "eléctrico — por ejemplo, avisos de empleo, eventos corporativos "
+        "genéricos, premios, aniversarios, o cualquier nota que solo mencione "
+        "a una empresa del sector de paso sin aportar información sobre "
+        "regulación, proyectos, precios, contratos, tecnología o actores del "
+        "mercado. true en cualquier otro caso. Si es false, igual completa "
+        "el resto de los campos de la forma más razonable posible.\n\n"
         f"Categorías válidas (elige exactamente una): {', '.join(CATEGORIAS_VALIDAS)}\n\n"
         f"Título: {titulo}\n"
         f"Contenido: {texto[:3000]}\n\n"
@@ -320,6 +346,7 @@ def clasificar_con_gemini(client, titulo, texto, contador_llamadas):
         actores = actores if isinstance(actores, list) else []
         actores_validados = _validar_actores_gemini(actores, titulo, texto)
         return {
+            "es_relevante": bool(resultado.get("es_relevante", True)),
             "categoria": categoria if categoria in CATEGORIAS_VALIDAS else "Generación/ERNC",
             "resumen_ejecutivo": (resultado.get("resumen_ejecutivo") or titulo)[:400],
             "impacto_mercado": impacto if impacto in IMPACTOS_VALIDOS else "Medio",
@@ -359,11 +386,12 @@ def _extraer_bajada(contenedor, titulo):
 
 def obtener_texto_y_fecha_articulo(session, url, max_chars=4000):
     """Devuelve la fecha real de publicación desde el meta tag del artículo,
-    o None si no se pudo acceder a la página (falla transitoria de red o de
-    proxy). Cuando devuelve None, el llamador debe OMITIR esa noticia en
-    esta corrida en vez de guardarla con una fecha inventada — así se
-    reintenta sola en la próxima corrida, en vez de quedar contaminada para
-    siempre (el INSERT OR IGNORE por url nunca la revisaría de nuevo)."""
+    o None si no se pudo CONFIRMAR (ni porque la página no cargó, ni porque
+    cargó pero no traía la etiqueta — ambos casos se tratan igual). Ya no
+    hay respaldo de "usar la hora actual": eso alguna vez coincidió con la
+    fecha de modificación del artículo en vez de la de publicación. El
+    llamador debe guardar la noticia con la fecha en blanco cuando esto
+    devuelve None, no inventar una."""
     try:
         resp = get_con_resiliencia(session, url, timeout=15)
         if resp is None:
@@ -372,10 +400,7 @@ def obtener_texto_y_fecha_articulo(session, url, max_chars=4000):
         meta_fecha = soup.find("meta", property="article:published_time")
         if meta_fecha and meta_fecha.get("content"):
             return meta_fecha["content"]
-        # La página sí cargó, solo que no tiene ese meta tag puntual — no es
-        # una falla de acceso, así que acá sí vale usar el momento de
-        # extracción como mejor aproximación disponible.
-        return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        return None
     except Exception:
         return None
 
@@ -414,8 +439,7 @@ def obtener_electromineria_categoria(session, limite=25):
             texto = _extraer_bajada(contenedor, titulo)
             fecha_pub = obtener_texto_y_fecha_articulo(session, url)
             if fecha_pub is None:
-                print(f"  Fecha no confirmada para \"{titulo[:60]}\" (falla de acceso) — se omite esta corrida, se reintenta en la siguiente.")
-                continue
+                print(f"  Fecha no confirmada para \"{titulo[:60]}\" — se guarda igual, con fecha en blanco.")
             noticias.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": texto, "fecha": fecha_pub})
             if len(noticias) >= limite:
                 break
@@ -448,8 +472,7 @@ def obtener_electromineria_via_html(session, limite=20):
             texto = _extraer_bajada(contenedor, titulo)
             fecha_pub = obtener_texto_y_fecha_articulo(session, url)
             if fecha_pub is None:
-                print(f"  Fecha no confirmada para \"{titulo[:60]}\" (falla de acceso) — se omite esta corrida, se reintenta en la siguiente.")
-                continue
+                print(f"  Fecha no confirmada para \"{titulo[:60]}\" — se guarda igual, con fecha en blanco.")
             noticias.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": texto, "fecha": fecha_pub})
             if len(noticias) >= limite:
                 break
@@ -518,8 +541,7 @@ def obtener_noticias():
                         # publicación (menos precisa, pero real, no inventada).
                         fecha_pub = getattr(entry, 'published', None)
                     if fecha_pub is None:
-                        print(f"  Fecha no confirmada para \"{titulo[:60]}\" (falla de acceso) — se omite esta corrida, se reintenta en la siguiente.")
-                        continue
+                        print(f"  Fecha no confirmada para \"{titulo[:60]}\" — se guarda igual, con fecha en blanco.")
                     content_raw = entry.content[0].value if "content" in entry and len(entry.content) > 0 else getattr(entry, 'summary', '')
                     texto = limpiar_html(content_raw)
                     noticias_em.append({"fuente": "ElectroMinería", "titulo": titulo, "url": url, "texto": texto, "fecha": fecha_pub})
@@ -556,11 +578,19 @@ def ejecutar_agente():
     cursor = conn.cursor()
 
     guardadas = 0
+    descartadas = 0
     origen_gemini = 0
     origen_reglas = 0
     for item in noticias:
         cursor.execute("SELECT id FROM noticias WHERE url = ?", (item["url"],))
         if cursor.fetchone():
+            continue
+
+        # Capa 1: filtro rápido por palabras clave, antes de gastar una
+        # llamada a Gemini (avisos de empleo, etc.)
+        if es_noticia_irrelevante(item["titulo"], item["texto"]):
+            print(f"Descartada (no es noticia de mercado): \"{item['titulo'][:70]}\"")
+            descartadas += 1
             continue
 
         analisis = None
@@ -577,6 +607,15 @@ def ejecutar_agente():
         if analisis is None:
             analisis = clasificar_localmente(item["titulo"], item["texto"])
             origen_reglas += 1
+
+        # Capa 2: el propio Gemini puede marcar como no relevante algo que
+        # el filtro de palabras clave no detectó (las reglas locales no
+        # juzgan relevancia, así que esto solo aplica cuando Gemini
+        # analizó la noticia).
+        if not analisis.get("es_relevante", True):
+            print(f"Descartada por Gemini (no es noticia de mercado): \"{item['titulo'][:70]}\"")
+            descartadas += 1
+            continue
 
         cursor.execute('''
             INSERT OR IGNORE INTO noticias 
@@ -598,7 +637,8 @@ def ejecutar_agente():
 
     conn.close()
     print(f"Proceso finalizado. {guardadas} nuevas noticias guardadas "
-          f"({origen_gemini} con Gemini, {origen_reglas} con reglas locales).")
+          f"({origen_gemini} con Gemini, {origen_reglas} con reglas locales). "
+          f"{descartadas} descartadas por no ser noticias de mercado.")
 
 if __name__ == "__main__":
     ejecutar_agente()
