@@ -69,6 +69,13 @@ def cargar_datos():
             # en silencio (-> NaT) las filas que no calzan con ese formato,
             # aunque se use utc=True — es como desaparecían las noticias.
             df['fecha_dt'] = pd.to_datetime(df['fecha_publicacion'], errors='coerce', utc=True, format='mixed')
+            # Las fechas se guardan en UTC. Sin esta conversión, una noticia
+            # publicada de noche en Chile (después de las 21:00 aprox., por
+            # el desfase UTC-3) queda mostrada con la fecha del día
+            # siguiente. Todo lo que se muestre o filtre en pantalla debe
+            # usar esta columna en hora de Chile, nunca fecha_publicacion
+            # cruda ni fecha_dt sin convertir.
+            df['fecha_dt'] = df['fecha_dt'].dt.tz_convert('America/Santiago')
         return df
     except Exception:
         return pd.DataFrame()
@@ -143,7 +150,7 @@ else:
     c2.metric("Noticias de Impacto Alto", alto_count, f"{pct_alto}% del total")
     top_cat = df_filtrado['categoria'].mode()[0] if not df_filtrado.empty and not df_filtrado['categoria'].mode().empty else "N/A"
     c3.metric("Tema Principal", top_cat)
-    ultima_f = str(df_filtrado['fecha_publicacion'].max())[:10] if not df_filtrado.empty else "N/A"
+    ultima_f = df_filtrado['fecha_dt'].max().strftime('%Y-%m-%d') if not df_filtrado.empty and df_filtrado['fecha_dt'].notna().any() else "N/A"
     c4.metric("Última Publicación", ultima_f)
 
     st.markdown("---")
@@ -170,7 +177,7 @@ else:
                     except:
                         actores_str = str(row['actores_mencionados'])
 
-                fecha_corta = str(row['fecha_publicacion'])[:10]
+                fecha_corta = row['fecha_dt'].strftime('%Y-%m-%d') if pd.notna(row['fecha_dt']) else "Sin fecha"
 
                 st.markdown(f"""
                 <div class="card-news">
@@ -201,7 +208,9 @@ else:
 
     with tab3:
         st.subheader("Tabla de Datos Completa")
+        df_tabla = df_filtrado.copy()
+        df_tabla['fecha'] = df_tabla['fecha_dt'].dt.strftime('%Y-%m-%d')
         st.dataframe(
-            df_filtrado[['fecha_publicacion', 'fuente', 'categoria', 'impacto_mercado', 'titulo', 'url']],
+            df_tabla[['fecha', 'fuente', 'categoria', 'impacto_mercado', 'titulo', 'url']],
             use_container_width=True
         )
