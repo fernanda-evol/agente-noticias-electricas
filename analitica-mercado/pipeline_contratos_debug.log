@@ -1,16 +1,23 @@
-Corrida: 2026-09-29T18:25:32.383268+00:00
+Corrida: 2026-09-29T18:31:27.486073+00:00
 total numero_a_mnemotecnico: 1124
 índice de suministradores: 76 numeros -> [10, 105, 11, 14, 17, 19, 20, 202, 208, 21, 236, 253, 258, 262, 264, 285, 288, 29, 298, 30, 301, 304, 305, 306, 31, 328, 333, 339, 341, 342, 349, 355, 357, 36, 364, 370, 376, 38, 381, 382, 386, 391, 399, 4, 407, 42, 433, 434, 439, 445, 448, 452, 453, 454, 465, 466, 467, 468, 481, 484, 49, 50, 52, 525, 526, 6, 60, 63, 66, 68, 70, 77, 78, 8, 89, 93]
-  [1/76] numero=10 mnemotecnico=P0010 offset=0: count=0 len(results)=0 next=False
+  [1/76] numero=10 mnemotecnico=G0010 offset=0: count=176 len(results)=100 next=True
+  [1/76] numero=10 mnemotecnico=G0010 offset=100: count=176 len(results)=76 next=False
   [2/76] numero=105 mnemotecnico=G0105 offset=0: count=0 len(results)=0 next=False
-  [3/76] numero=11 mnemotecnico=P0011 offset=0: count=0 len(results)=0 next=False
-  [4/76] numero=14 mnemotecnico=P0014 offset=0: count=0 len(results)=0 next=False
-  [5/76] numero=17 mnemotecnico=P0017 offset=0: count=0 len(results)=0 next=False
-  [6/76] numero=19 mnemotecnico=P0019 offset=0: count=0 len(results)=0 next=False
-  [7/76] numero=20 mnemotecnico=P0020 offset=0: count=0 len(results)=0 next=False
-  [8/76] numero=202 mnemotecnico=L0202 offset=0: count=0 len(results)=0 next=False
+  [3/76] numero=11 mnemotecnico=G0011 offset=0: count=48 len(results)=48 next=False
+  [4/76] numero=14 mnemotecnico=G0014 offset=0: count=1 len(results)=1 next=False
+  [5/76] numero=17 mnemotecnico=G0017 offset=0: count=13 len(results)=13 next=False
+  [6/76] numero=19 mnemotecnico=G0019 offset=0: count=7 len(results)=7 next=False
+  [7/76] numero=20 mnemotecnico=G0020 offset=0: count=0 len(results)=0 next=False
+  [8/76] numero=202 mnemotecnico=G0202 offset=0: count=0 len(results)=0 next=False
   [9/76] numero=208 mnemotecnico=G0208 offset=0: count=0 len(results)=0 next=False
-  [10/76] numero=21 mnemotecnico=P0021 offset=0: count=0 len(results)=0 next=False
+  [10/76] numero=21 mnemotecnico=G0021 offset=0: count=612 len(results)=100 next=True
+  [10/76] numero=21 mnemotecnico=G0021 offset=100: count=612 len(results)=100 next=True
+  [10/76] numero=21 mnemotecnico=G0021 offset=200: count=612 len(results)=100 next=True
+  [10/76] numero=21 mnemotecnico=G0021 offset=300: count=612 len(results)=100 next=True
+  [10/76] numero=21 mnemotecnico=G0021 offset=400: count=612 len(results)=100 next=True
+  [10/76] numero=21 mnemotecnico=G0021 offset=500: count=612 len(results)=100 next=True
+  [10/76] numero=21 mnemotecnico=G0021 offset=600: count=612 len(results)=12 next=False
   [11/76] numero=236 mnemotecnico=G0236 offset=0: count=0 len(results)=0 next=False
   [12/76] numero=253 mnemotecnico=G0253 offset=0: count=0 len(results)=0 next=False
   [13/76] numero=258 mnemotecnico=G0258 offset=0: count=0 len(results)=0 next=False
@@ -18,14 +25,14 @@ total numero_a_mnemotecnico: 1124
   [15/76] numero=264 mnemotecnico=G0264 offset=0: count=0 len(results)=0 next=False
   [16/76] numero=285 mnemotecnico=G0285 offset=0: count=0 len(results)=0 next=False
   [17/76] numero=288 mnemotecnico=G0288 offset=0: count=0 len(results)=0 next=False
-  [18/76] numero=29 mnemotecnico=P0029 offset=0: count=0 len(results)=0 next=False
+  [18/76] numero=29 mnemotecnico=G0029 offset=0: count=0 len(results)=0 next=False
   [19/76] numero=298 mnemotecnico=G0298 offset=0: count=0 len(results)=0 next=False
-  [20/76] numero=30 mnemotecnico=P0030 offset=0: count=0 len(results)=0 next=False
+  [20/76] numero=30 mnemotecnico=G0030 offset=0: count=1 len(results)=1 next=False
   [21/76] numero=301 mnemotecnico=G0301 offset=0: count=0 len(results)=0 next=False
   [22/76] numero=304 mnemotecnico=G0304 offset=0: count=0 len(results)=0 next=False
   [23/76] numero=305 mnemotecnico=G0305 offset=0: count=0 len(results)=0 next=False
   [24/76] numero=306 mnemotecnico=G0306 offset=0: count=0 len(results)=0 next=False
-  [25/76] numero=31 mnemotecnico=P0031 offset=0: count=0 len(results)=0 next=False
+  [25/76] numero=31 mnemotecnico=G0031 offset=0: count=7 len(results)=7 next=False
   [26/76] numero=328 mnemotecnico=G0328 offset=0: count=0 len(results)=0 next=False
   [27/76] numero=333 mnemotecnico=G0333 offset=0: count=0 len(results)=0 next=False
   [28/76] numero=339 mnemotecnico=G0339 offset=0: count=0 len(results)=0 next=False
@@ -34,19 +41,24 @@ total numero_a_mnemotecnico: 1124
   [31/76] numero=349 mnemotecnico=G0349 offset=0: count=0 len(results)=0 next=False
   [32/76] numero=355 mnemotecnico=G0355 offset=0: count=0 len(results)=0 next=False
   [33/76] numero=357 mnemotecnico=G0357 offset=0: count=0 len(results)=0 next=False
-  [34/76] numero=36 mnemotecnico=T0036 offset=0: count=0 len(results)=0 next=False
+  [34/76] numero=36 mnemotecnico=G0036 offset=0: count=0 len(results)=0 next=False
   [35/76] numero=364 mnemotecnico=G0364 offset=0: count=0 len(results)=0 next=False
   [36/76] numero=370 mnemotecnico=G0370 offset=0: count=0 len(results)=0 next=False
   [37/76] numero=376 mnemotecnico=G0376 offset=0: count=0 len(results)=0 next=False
-  [38/76] numero=38 mnemotecnico=T0038 offset=0: count=0 len(results)=0 next=False
+  [38/76] numero=38 mnemotecnico=G0038 offset=0: count=0 len(results)=0 next=False
   [39/76] numero=381 mnemotecnico=G0381 offset=0: count=0 len(results)=0 next=False
   [40/76] numero=382 mnemotecnico=G0382 offset=0: count=0 len(results)=0 next=False
   [41/76] numero=386 mnemotecnico=G0386 offset=0: count=0 len(results)=0 next=False
   [42/76] numero=391 mnemotecnico=G0391 offset=0: count=0 len(results)=0 next=False
   [43/76] numero=399 mnemotecnico=G0399 offset=0: count=0 len(results)=0 next=False
-  [44/76] numero=4 mnemotecnico=P0004 offset=0: count=0 len(results)=0 next=False
+  [44/76] numero=4 mnemotecnico=G0004 offset=0: count=521 len(results)=100 next=True
+  [44/76] numero=4 mnemotecnico=G0004 offset=100: count=521 len(results)=100 next=True
+  [44/76] numero=4 mnemotecnico=G0004 offset=200: count=521 len(results)=100 next=True
+  [44/76] numero=4 mnemotecnico=G0004 offset=300: count=521 len(results)=100 next=True
+  [44/76] numero=4 mnemotecnico=G0004 offset=400: count=521 len(results)=100 next=True
+  [44/76] numero=4 mnemotecnico=G0004 offset=500: count=521 len(results)=21 next=False
   [45/76] numero=407 mnemotecnico=G0407 offset=0: count=0 len(results)=0 next=False
-  [46/76] numero=42 mnemotecnico=T0042 offset=0: count=0 len(results)=0 next=False
+  [46/76] numero=42 mnemotecnico=G0042 offset=0: count=0 len(results)=0 next=False
   [47/76] numero=433 mnemotecnico=G0433 offset=0: count=0 len(results)=0 next=False
   [48/76] numero=434 mnemotecnico=G0434 offset=0: count=0 len(results)=0 next=False
   [49/76] numero=439 mnemotecnico=G0439 offset=0: count=0 len(results)=0 next=False
@@ -61,20 +73,22 @@ total numero_a_mnemotecnico: 1124
   [58/76] numero=468 mnemotecnico=G0468 offset=0: count=0 len(results)=0 next=False
   [59/76] numero=481 mnemotecnico=G0481 offset=0: count=0 len(results)=0 next=False
   [60/76] numero=484 mnemotecnico=G0484 offset=0: count=0 len(results)=0 next=False
-  [61/76] numero=49 mnemotecnico=T0049 offset=0: count=0 len(results)=0 next=False
-  [62/76] numero=50 mnemotecnico=T0050 offset=0: count=0 len(results)=0 next=False
-  [63/76] numero=52 mnemotecnico=T0052 offset=0: count=0 len(results)=0 next=False
+  [61/76] numero=49 mnemotecnico=G0049 offset=0: count=0 len(results)=0 next=False
+  [62/76] numero=50 mnemotecnico=G0050 offset=0: count=10 len(results)=10 next=False
+  [63/76] numero=52 mnemotecnico=G0052 offset=0: count=0 len(results)=0 next=False
   [64/76] numero=525 mnemotecnico=G0525 offset=0: count=0 len(results)=0 next=False
   [65/76] numero=526 mnemotecnico=G0526 offset=0: count=0 len(results)=0 next=False
-  [66/76] numero=6 mnemotecnico=P0006 offset=0: count=0 len(results)=0 next=False
-  [67/76] numero=60 mnemotecnico=T0060 offset=0: count=0 len(results)=0 next=False
+  [66/76] numero=6 mnemotecnico=G0006 offset=0: count=201 len(results)=100 next=True
+  [66/76] numero=6 mnemotecnico=G0006 offset=100: count=201 len(results)=100 next=True
+  [66/76] numero=6 mnemotecnico=G0006 offset=200: count=201 len(results)=1 next=False
+  [67/76] numero=60 mnemotecnico=G0060 offset=0: count=0 len(results)=0 next=False
   [68/76] numero=63 mnemotecnico=G0063 offset=0: count=0 len(results)=0 next=False
-  [69/76] numero=66 mnemotecnico=L0066 offset=0: count=0 len(results)=0 next=False
-  [70/76] numero=68 mnemotecnico=L0068 offset=0: count=0 len(results)=0 next=False
-  [71/76] numero=70 mnemotecnico=L0070 offset=0: count=0 len(results)=0 next=False
-  [72/76] numero=77 mnemotecnico=L0077 offset=0: count=0 len(results)=0 next=False
-  [73/76] numero=78 mnemotecnico=L0078 offset=0: count=0 len(results)=0 next=False
-  [74/76] numero=8 mnemotecnico=P0008 offset=0: count=0 len(results)=0 next=False
+  [69/76] numero=66 mnemotecnico=G0066 offset=0: count=0 len(results)=0 next=False
+  [70/76] numero=68 mnemotecnico=G0068 offset=0: count=0 len(results)=0 next=False
+  [71/76] numero=70 mnemotecnico=G0070 offset=0: count=0 len(results)=0 next=False
+  [72/76] numero=77 mnemotecnico=G0077 offset=0: count=0 len(results)=0 next=False
+  [73/76] numero=78 mnemotecnico=G0078 offset=0: count=5 len(results)=5 next=False
+  [74/76] numero=8 mnemotecnico=G0008 offset=0: count=18 len(results)=18 next=False
   [75/76] numero=89 mnemotecnico=G0089 offset=0: count=0 len(results)=0 next=False
   [76/76] numero=93 mnemotecnico=G0093 offset=0: count=189 len(results)=100 next=True
   [76/76] numero=93 mnemotecnico=G0093 offset=100: count=189 len(results)=89 next=False
