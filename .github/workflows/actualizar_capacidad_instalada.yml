@@ -51,4 +51,7 @@ jobs:
           if [ -f analitica-mercado/pipeline_contratos_error.log ]; then
             git add -f analitica-mercado/pipeline_contratos_error.log
           fi
+          if [ -f analitica-mercado/pipeline_contratos_debug.log ]; then
+            git add -f analitica-mercado/pipeline_contratos_debug.log
+          fi
           git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update capacidad instalada y contratos [skip ci]" && git push)

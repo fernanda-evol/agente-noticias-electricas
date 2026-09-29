@@ -132,10 +132,13 @@ def fetch_contratos(api_key: str, numero_a_mnemotecnico: dict[int, str]) -> list
     url = f"{BASE_URL}/api/v2/recursos/contratos_de_suministro_vigentes/"
     numeros = fetch_suministradores_index(api_key)
     todos: list[dict] = []
+    debug_lines = [f"índice de suministradores: {len(numeros)} numeros -> {numeros}"]
     for i, numero in enumerate(numeros, start=1):
         mnemotecnico = numero_a_mnemotecnico.get(numero)
         if not mnemotecnico:
-            print(f"  [{i}/{len(numeros)}] numero={numero}: sin mnemotécnico en infotecnica/empresas, se omite", file=sys.stderr)
+            msg = f"  [{i}/{len(numeros)}] numero={numero}: sin mnemotécnico en infotecnica/empresas, se omite"
+            print(msg, file=sys.stderr)
+            debug_lines.append(msg)
             continue
         registros: list[dict] = []
         offset = 0
@@ -148,12 +151,24 @@ def fetch_contratos(api_key: str, numero_a_mnemotecnico: dict[int, str]) -> list
             })
             results = body.get("results", [])
             registros.extend(results)
+            debug_lines.append(
+                f"  [{i}/{len(numeros)}] numero={numero} mnemotecnico={mnemotecnico} "
+                f"offset={offset}: count={body.get('count')} len(results)={len(results)} next={bool(body.get('next'))}"
+            )
             if not body.get("next") or not results:
                 break
             offset += PAGE_LIMIT
         todos.extend(registros)
         print(f"  [{i}/{len(numeros)}] {mnemotecnico}: {len(registros)} filas de contrato")
     print(f"  contratos_de_suministro_vigentes: {len(todos)} filas en total")
+
+    debug_path = os.path.join(os.path.dirname(__file__), "pipeline_contratos_debug.log")
+    with open(debug_path, "w") as f:
+        f.write(f"Corrida: {datetime.now(timezone.utc).isoformat()}\n")
+        f.write(f"total numero_a_mnemotecnico: {len(numero_a_mnemotecnico)}\n")
+        f.write("\n".join(debug_lines))
+        f.write("\n")
+
     return todos
 
 
