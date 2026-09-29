@@ -17,6 +17,7 @@ def _cargar_tab(nombre_archivo: str):
 
 
 capacidad_instalada = _cargar_tab("01_capacidad_instalada.py")
+contratos = _cargar_tab("02_contratos.py")
 
 st.set_page_config(
     page_title="Analítica de Mercado Eléctrico · EVOL",
@@ -40,9 +41,12 @@ st.markdown(f"""
 st.title("📊 Analítica de Mercado Eléctrico Chileno")
 st.caption("Datos públicos del Coordinador Eléctrico Nacional (API SIPUB)")
 
-(tab_capacidad,) = st.tabs(["⚡ Capacidad Instalada"])
+tab_capacidad, tab_contratos = st.tabs(["⚡ Capacidad Instalada", "📄 Contratos de Suministro"])
 # Los próximos tabs (costo marginal, etc.) se agregan aquí como
-# tabs/02_....py + una entrada más en la lista de arriba.
+# tabs/03_....py + una entrada más en la lista de arriba.
 
 with tab_capacidad:
     capacidad_instalada.render()
+
+with tab_contratos:
+    contratos.render()

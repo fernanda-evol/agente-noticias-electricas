@@ -1,4 +1,4 @@
-name: Actualizar Capacidad Instalada (Analítica de Mercado)
+name: Actualizar Analítica de Mercado (Capacidad y Contratos)
 
 on:
   schedule:
@@ -30,15 +30,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Ejecutar pipeline de SIPUB
+      - name: Ejecutar pipeline de capacidad instalada
         working-directory: analitica-mercado
         env:
           SIPUB_API_KEY: ${{ secrets.SIPUB_API_KEY }}
         run: python pipeline.py
+
+      - name: Ejecutar pipeline de contratos de suministro
+        working-directory: analitica-mercado
+        env:
+          SIPUB_API_KEY: ${{ secrets.SIPUB_API_KEY }}
+        run: python pipeline_contratos.py
 
       - name: Guardar cambios en la base de datos
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add analitica-mercado/mercado.duckdb
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update capacidad instalada [skip ci]" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update capacidad instalada y contratos [skip ci]" && git push)
