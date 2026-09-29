@@ -1,0 +1,7 @@
+[theme]
+# Paleta de marca EVOL, igual que en el agente de noticias (noticias/.streamlit/config.toml)
+primaryColor = "#00629B"
+backgroundColor = "#F5FAFD"
+secondaryBackgroundColor = "#EAF6FC"
+textColor = "#1A1A2E"
+font = "sans serif"
