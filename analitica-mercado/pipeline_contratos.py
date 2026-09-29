@@ -103,43 +103,81 @@ def fetch_empresas(api_key: str) -> list[dict]:
 
 
 def fetch_suministradores_index(api_key: str) -> list[int]:
-    """/contratos_de_suministro_vigentes/slices/ trae el listado de
-    `numero` de empresas que aparecen como suministradoras en algún
-    contrato. Es solo un índice, sin el detalle de cada contrato."""
+    """/contratos_de_suministro_vigentes/slices/ trae el listado de IDs de
+    "suministrador" que aparecen en algún contrato. Es solo un índice, sin
+    el detalle de cada contrato.
+
+    OJO: este ID **no es** el campo `numero` de infotecnica/empresas, sino
+    su campo `grupo` (grupo económico) -- confirmado probando en vivo:
+    filtrar por suministrador_mnemotecnico=G0021 (ENEL GENERACIÓN CHILE,
+    numero=21, grupo=20) devuelve filas con "suministrador": 20, no 21.
+    Además `grupo` tampoco es único (varias empresas del mismo grupo
+    económico lo comparten), así que resolver el nombre "hacia atrás" desde
+    este ID es ambiguo -- por eso fetch_contratos anota el nombre real
+    directamente al bajar los datos, en vez de cruzarlo después por ID."""
     url = f"{BASE_URL}/api/v2/recursos/contratos_de_suministro_vigentes/slices/"
     registros = _paginate_drf(url, api_key)
     # Cada elemento viene como {"suministrador": "10"} -- el número como
     # STRING, no int, a diferencia de infotecnica/empresas donde `numero`
-    # es int. Sin este cast, el cruce contra numero_a_mnemotecnico no
-    # encuentra nada y el pipeline termina sin ningún contrato.
-    numeros: list[int] = []
+    # y `grupo` son int. Sin este cast, el cruce no encuentra nada.
+    grupos: list[int] = []
     for r in registros:
         crudo = r if isinstance(r, (int, str)) else r.get("suministrador")
         if crudo is None:
             continue
         try:
-            numeros.append(int(crudo))
+            grupos.append(int(crudo))
         except (TypeError, ValueError):
             print(f"  valor de suministrador no numérico, se omite: {crudo!r}", file=sys.stderr)
-    print(f"  índice de suministradores: {len(numeros)} empresas")
-    return numeros
+    print(f"  índice de suministradores: {len(grupos)} grupos económicos")
+    return grupos
 
 
-def fetch_contratos(api_key: str, numero_a_mnemotecnico: dict[int, str]) -> list[dict]:
-    """Contratos de suministro vigentes, iterando por cada suministrador
+def _elegir_representante(candidatos: list[dict]) -> dict:
+    """Cuando varias empresas comparten el mismo `grupo`, se prioriza la que
+    tiene numero == grupo (empíricamente, suele ser la entidad "raíz" del
+    grupo económico -- ej. Colbún numero=4/grupo=4, mientras sus filiales
+    comparten grupo=4 con numero propio distinto) y que no esté marcada
+    "[No_Mostrar]"; si ninguna calza con eso, la primera disponible."""
+    for c in candidatos:
+        if c.get("numero") == c.get("grupo") and "[No_Mostrar]" not in (c.get("nombre") or ""):
+            return c
+    for c in candidatos:
+        if "[No_Mostrar]" not in (c.get("nombre") or ""):
+            return c
+    return candidatos[0]
+
+
+def fetch_contratos(api_key: str, empresas: list[dict]) -> list[dict]:
+    """Contratos de suministro vigentes, iterando por cada grupo económico
     del índice (el endpoint exige el filtro `suministrador_mnemotecnico`;
-    sin él responde 400 aunque el Swagger lo marque como opcional)."""
+    sin él responde 400 aunque el Swagger lo marque como opcional).
+
+    El nombre del suministrador se anota directamente sobre cada fila
+    usando la empresa representante que se eligió para consultar ese
+    grupo -- no se resuelve después por ID, porque `grupo` no es único
+    (ver fetch_suministradores_index)."""
     url = f"{BASE_URL}/api/v2/recursos/contratos_de_suministro_vigentes/"
-    numeros = fetch_suministradores_index(api_key)
+
+    candidatos_por_grupo: dict[int, list[dict]] = {}
+    for e in empresas:
+        mnem = str(e.get("mnemotecnico", ""))
+        if mnem.startswith("G") and e.get("grupo") is not None:
+            candidatos_por_grupo.setdefault(e["grupo"], []).append(e)
+    grupo_a_representante = {g: _elegir_representante(cs) for g, cs in candidatos_por_grupo.items()}
+    print(f"  ({len(grupo_a_representante)} grupos económicos con al menos una empresa 'G...' disponible como suministradora)")
+
+    grupos = fetch_suministradores_index(api_key)
     todos: list[dict] = []
-    debug_lines = [f"índice de suministradores: {len(numeros)} numeros -> {numeros}"]
-    for i, numero in enumerate(numeros, start=1):
-        mnemotecnico = numero_a_mnemotecnico.get(numero)
-        if not mnemotecnico:
-            msg = f"  [{i}/{len(numeros)}] numero={numero}: sin mnemotécnico en infotecnica/empresas, se omite"
+    debug_lines = [f"índice de suministradores: {len(grupos)} grupos -> {grupos}"]
+    for i, grupo in enumerate(grupos, start=1):
+        rep = grupo_a_representante.get(grupo)
+        if not rep:
+            msg = f"  [{i}/{len(grupos)}] grupo={grupo}: sin empresa 'G...' con ese grupo en infotecnica/empresas, se omite"
             print(msg, file=sys.stderr)
             debug_lines.append(msg)
             continue
+        mnemotecnico, nombre = rep["mnemotecnico"], rep["nombre"]
         registros: list[dict] = []
         offset = 0
         while offset <= MAX_PAGES_SAFETY * PAGE_LIMIT:
@@ -152,20 +190,23 @@ def fetch_contratos(api_key: str, numero_a_mnemotecnico: dict[int, str]) -> list
             results = body.get("results", [])
             registros.extend(results)
             debug_lines.append(
-                f"  [{i}/{len(numeros)}] numero={numero} mnemotecnico={mnemotecnico} "
+                f"  [{i}/{len(grupos)}] grupo={grupo} mnemotecnico={mnemotecnico} ({nombre}) "
                 f"offset={offset}: count={body.get('count')} len(results)={len(results)} next={bool(body.get('next'))}"
             )
             if not body.get("next") or not results:
                 break
             offset += PAGE_LIMIT
+        for r in registros:
+            r["suministrador_nombre"] = nombre
+            r["suministrador_mnemotecnico_resuelto"] = mnemotecnico
         todos.extend(registros)
-        print(f"  [{i}/{len(numeros)}] {mnemotecnico}: {len(registros)} filas de contrato")
+        print(f"  [{i}/{len(grupos)}] {mnemotecnico} ({nombre}): {len(registros)} filas de contrato")
     print(f"  contratos_de_suministro_vigentes: {len(todos)} filas en total")
 
     debug_path = os.path.join(os.path.dirname(__file__), "pipeline_contratos_debug.log")
     with open(debug_path, "w") as f:
         f.write(f"Corrida: {datetime.now(timezone.utc).isoformat()}\n")
-        f.write(f"total numero_a_mnemotecnico: {len(numero_a_mnemotecnico)}\n")
+        f.write(f"grupos económicos resolubles: {len(grupo_a_representante)}\n")
         f.write("\n".join(debug_lines))
         f.write("\n")
 
@@ -201,18 +242,23 @@ def build_database(empresas: list[dict], contratos: list[dict]) -> None:
     con.execute("CREATE TABLE empresas_infotecnica_raw AS SELECT * FROM df_emp")
     con.execute("CREATE TABLE contratos_suministro_raw AS SELECT * FROM df_con")
 
-    # Vista de análisis: cada fila de contrato con el nombre de la empresa
-    # suministradora y del cliente resueltos (join por `numero`).
+    # Vista de análisis: cada fila de contrato con el nombre del cliente
+    # resuelto. El nombre del suministrador YA viene anotado en cada fila
+    # desde fetch_contratos (columnas suministrador_nombre /
+    # suministrador_mnemotecnico_resuelto) -- no se cruza por ID acá.
     #
-    # `numero` en infotecnica/empresas NO es único entre categorías (giro=1
-    # "G...", generación; giro=4 "L...", industria/cliente libre; y otras),
-    # así que numero=10 puede calzar con más de una empresa. El
-    # suministrador siempre es generador (mnemotécnico "G..."), pero el
-    # cliente puede ser cualquier categoría -- el campo `tipo` del contrato
-    # (R: regulado, L: libre, C: entre generadores) da la pista de cuál
-    # prefijo priorizar; QUALIFY se queda con una sola fila por contrato
-    # aunque la pista no baste para desambiguar del todo (mejor una
-    # coincidencia posiblemente imperfecta que filas duplicadas).
+    # ¿Por qué no cruzar también al cliente por `numero` o `grupo` sin más?
+    # `suministrador`/`cliente` en el contrato son un ID de GRUPO económico
+    # (confirmado en vivo: filtrar por G0021 -- numero=21, grupo=20 --
+    # devuelve filas con "suministrador": 20), y `grupo` tampoco es único
+    # entre empresas del mismo grupo económico. Sin poder repetir el mismo
+    # truco que con el suministrador (acá no elegimos con qué mnemotécnico
+    # consultar), se prioriza por heurística: `tipo` del contrato (R/L/C)
+    # sugiere la categoría, luego se evita nombres "[No_Mostrar]" y se
+    # prefiere numero==grupo (suele ser la entidad "raíz"); QUALIFY se
+    # queda con una sola fila por contrato aunque la pista no alcance a
+    # desambiguar del todo (mejor una coincidencia posiblemente imperfecta
+    # que filas duplicadas).
     con.execute("""
         CREATE VIEW contratos_con_nombres AS
         WITH cliente_candidato AS (
@@ -229,20 +275,18 @@ def build_database(empresas: list[dict], contratos: list[dict]) -> None:
                             WHEN c.tipo = 'R' AND cli.mnemotecnico NOT LIKE 'G%' THEN 0
                             ELSE 1
                         END,
+                        CASE WHEN cli.nombre LIKE '%[No_Mostrar]%' THEN 1 ELSE 0 END,
+                        CASE WHEN cli.numero = cli.grupo THEN 0 ELSE 1 END,
                         cli.id_infotecnica
                 ) AS rn
             FROM contratos_suministro_raw c
-            LEFT JOIN empresas_infotecnica_raw cli ON cli.numero = c.cliente
+            LEFT JOIN empresas_infotecnica_raw cli ON cli.grupo = c.cliente
         )
         SELECT
             c.*,
-            sup.nombre        AS suministrador_nombre,
-            sup.mnemotecnico  AS suministrador_mnemotecnico_resuelto,
             cc.cliente_nombre,
             cc.cliente_mnemotecnico_resuelto
         FROM contratos_suministro_raw c
-        LEFT JOIN empresas_infotecnica_raw sup
-            ON sup.numero = c.suministrador AND sup.mnemotecnico LIKE 'G%'
         LEFT JOIN cliente_candidato cc
             ON cc.contrato_row_id = c.contrato_row_id AND cc.rn = 1
     """)
@@ -274,20 +318,8 @@ def main():
     api_key = _get_api_key()
     print("Descargando infotecnica/empresas...")
     empresas = fetch_empresas(api_key)
-    # OJO: `numero` NO es único en infotecnica/empresas -- se reutiliza entre
-    # categorías (giro=1 "G0010" generador, giro=4 "L0010" industria, etc.),
-    # así que numero=10 puede mapear tanto a "G0010" (AES Andes) como a
-    # "P0010" (otra entidad no relacionada) según qué registro gane el dict.
-    # Los suministradores de contratos_de_suministro_vigentes son siempre
-    # generadores (mnemotécnico "G..."), así que el mapeo se restringe a esos.
-    numero_a_mnemotecnico = {
-        e["numero"]: e["mnemotecnico"]
-        for e in empresas
-        if e.get("numero") is not None and str(e.get("mnemotecnico", "")).startswith("G")
-    }
-    print(f"  ({len(numero_a_mnemotecnico)} empresas con mnemotécnico 'G...' disponibles como suministradoras)")
     print("Descargando contratos_de_suministro_vigentes...")
-    contratos = fetch_contratos(api_key, numero_a_mnemotecnico)
+    contratos = fetch_contratos(api_key, empresas)
     print("Actualizando base DuckDB...")
     build_database(empresas, contratos)
     print(f"Listo: {DB_PATH}")

@@ -86,32 +86,42 @@ def render():
     if ultima is not None:
         st.caption(f"Datos actualizados desde SIPUB el {ultima}")
 
-    # Capacidad operativa por empresa (nombre normalizado -> MW)
+    # Capacidad por empresa (nombre normalizado -> MW), toda y solo operativa
     cap_por_empresa = pd.Series(dtype=float)
+    cap_por_empresa_operativa = pd.Series(dtype=float)
+    nombre_original = {}
     if not capacidad.empty:
-        cap_op = capacidad[capacidad["estado"].str.contains("Operativ", case=False, na=False)].copy()
-        cap_op["empresa_norm"] = cap_op["propietario"].map(_norm)
-        cap_por_empresa = cap_op.groupby("empresa_norm")["capacidad_mw_centrales"].sum()
+        cap = capacidad.copy()
+        cap["empresa_norm"] = cap["propietario"].map(_norm)
+        cap_por_empresa = cap.groupby("empresa_norm")["capacidad_mw_centrales"].sum()
+        cap_op = cap[cap["estado"].str.contains("Operativ", case=False, na=False)]
+        cap_por_empresa_operativa = cap_op.groupby("empresa_norm")["capacidad_mw_centrales"].sum()
+        # nombre "bonito" (tal como aparece en capacidad_central) por cada norm,
+        # para mostrar en el selector el mismo texto que en la pestaña de Capacidad.
+        nombre_original = cap.drop_duplicates("empresa_norm").set_index("empresa_norm")["propietario"].to_dict()
 
     contratos = contratos.copy()
     contratos["suministrador_norm"] = contratos["suministrador_nombre"].map(_norm)
-    contratos["capacidad_mw"] = contratos["suministrador_norm"].map(cap_por_empresa)
 
-    # ---------- selector de empresa ----------
-    empresas = (
-        contratos.dropna(subset=["suministrador_nombre"])
-        .groupby("suministrador_nombre")["energia_contratada"].sum()
-        .sort_values(ascending=False)
-        .index.tolist()
-    )
-    if not empresas:
-        st.warning("No hay empresas suministradoras identificadas en los contratos.")
+    # ---------- selector de empresa: mismo universo que la pestaña de Capacidad Instalada ----------
+    if cap_por_empresa.empty:
+        st.warning("No hay datos de capacidad instalada cargados todavía para armar el listado de empresas.")
         return
 
-    empresa_sel = st.selectbox("Empresa suministradora", empresas)
-    df_emp = contratos[contratos["suministrador_nombre"] == empresa_sel].copy()
+    empresas_norm = cap_por_empresa.sort_values(ascending=False).index.tolist()
+    empresas = [nombre_original.get(n, n) for n in empresas_norm]
 
-    cap_mw = cap_por_empresa.get(_norm(empresa_sel))
+    empresa_sel = st.selectbox("Empresa generadora", empresas)
+    empresa_sel_norm = _norm(empresa_sel)
+    df_emp = contratos[contratos["suministrador_norm"] == empresa_sel_norm].copy()
+
+    cap_mw = cap_por_empresa_operativa.get(empresa_sel_norm)
+
+    if df_emp.empty:
+        st.info(f"**{empresa_sel}** no tiene contratos de suministro vigentes registrados en SIPUB.")
+        if pd.notna(cap_mw):
+            st.metric("Capacidad operativa instalada", f"{cap_mw:,.0f} MW")
+        return
 
     # ---------- KPIs ----------
     anio_max = int(df_emp["año"].max()) if df_emp["año"].notna().any() else None
@@ -133,10 +143,7 @@ def render():
     col4.metric("Clientes distintos", f"{df_emp['cliente_nombre'].nunique():,}")
 
     if pd.isna(cap_mw):
-        st.caption(
-            "⚠️ No se encontró capacidad instalada para esta empresa con ese nombre exacto "
-            "en `capacidad_central` — puede tener una razón social distinta entre ambas fuentes."
-        )
+        st.caption("⚠️ Esta empresa no tiene centrales en estado Operativa registradas en `capacidad_central`.")
 
     # ---------- evolución en el tiempo ----------
     st.markdown("#### Evolución de energía y potencia contratada")

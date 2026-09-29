@@ -130,6 +130,40 @@ def render():
 
     st.divider()
 
+    # --- Mix tecnológico por empresa ---
+    st.subheader("Mix tecnológico por empresa")
+    st.caption("% de la capacidad de cada empresa que corresponde a cada tecnología (dentro del filtro actual).")
+    top_n_mix = st.slider("Empresas a mostrar (ordenadas por capacidad total)", 5, 40, 15, key="mix_top_n")
+    empresas_top_mix = (
+        df_f.groupby("propietario")["capacidad_mw_centrales"].sum()
+        .sort_values(ascending=False).head(top_n_mix).index
+    )
+    df_mix = df_f[df_f["propietario"].isin(empresas_top_mix)].copy()
+    if not df_mix.empty:
+        mix = (
+            df_mix.groupby(["propietario", "tipo_tecnologia"], as_index=False)["capacidad_mw_centrales"].sum()
+        )
+        mix["pct"] = mix.groupby("propietario")["capacidad_mw_centrales"].transform(lambda s: 100 * s / s.sum())
+        orden_empresas = list(empresas_top_mix)[::-1]
+        fig = px.bar(
+            mix, x="pct", y="propietario", color="tipo_tecnologia", orientation="h",
+            labels={"pct": "% de la capacidad de la empresa", "propietario": "", "tipo_tecnologia": "Tecnología"},
+            category_orders={"propietario": orden_empresas},
+            custom_data=["tipo_tecnologia", "capacidad_mw_centrales"],
+        )
+        fig.update_traces(
+            hovertemplate="%{customdata[0]}<br>%{x:.1f}% · %{customdata[1]:,.0f} MW<extra></extra>"
+        )
+        fig.update_layout(
+            barmode="stack", height=max(380, 28 * top_n_mix), xaxis_ticksuffix="%",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No hay datos para armar el mix tecnológico con el filtro actual.")
+
+    st.divider()
+
     # --- Tabla de detalle ---
     st.subheader("Detalle por central")
     st.dataframe(
