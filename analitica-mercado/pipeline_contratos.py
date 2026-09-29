@@ -108,8 +108,19 @@ def fetch_suministradores_index(api_key: str) -> list[int]:
     contrato. Es solo un índice, sin el detalle de cada contrato."""
     url = f"{BASE_URL}/api/v2/recursos/contratos_de_suministro_vigentes/slices/"
     registros = _paginate_drf(url, api_key)
-    numeros = [r if isinstance(r, int) else r.get("suministrador") for r in registros]
-    numeros = [n for n in numeros if n is not None]
+    # Cada elemento viene como {"suministrador": "10"} -- el número como
+    # STRING, no int, a diferencia de infotecnica/empresas donde `numero`
+    # es int. Sin este cast, el cruce contra numero_a_mnemotecnico no
+    # encuentra nada y el pipeline termina sin ningún contrato.
+    numeros: list[int] = []
+    for r in registros:
+        crudo = r if isinstance(r, (int, str)) else r.get("suministrador")
+        if crudo is None:
+            continue
+        try:
+            numeros.append(int(crudo))
+        except (TypeError, ValueError):
+            print(f"  valor de suministrador no numérico, se omite: {crudo!r}", file=sys.stderr)
     print(f"  índice de suministradores: {len(numeros)} empresas")
     return numeros
 
@@ -147,6 +158,11 @@ def fetch_contratos(api_key: str, numero_a_mnemotecnico: dict[int, str]) -> list
 
 
 def build_database(empresas: list[dict], contratos: list[dict]) -> None:
+    if not empresas:
+        raise RuntimeError("fetch_empresas() no devolvió ningún registro; no se actualiza la base.")
+    if not contratos:
+        raise RuntimeError("fetch_contratos() no devolvió ningún registro; no se actualiza la base.")
+
     con = duckdb.connect(DB_PATH)
 
     con.execute("DROP TABLE IF EXISTS empresas_infotecnica_raw")
@@ -202,6 +218,12 @@ def build_database(empresas: list[dict], contratos: list[dict]) -> None:
 
 
 def main():
+    # Limpia el log de una corrida fallida anterior; si esta corrida
+    # también falla, el bloque de abajo lo vuelve a escribir.
+    error_path = os.path.join(os.path.dirname(__file__), "pipeline_contratos_error.log")
+    if os.path.exists(error_path):
+        os.remove(error_path)
+
     api_key = _get_api_key()
     print("Descargando infotecnica/empresas...")
     empresas = fetch_empresas(api_key)
