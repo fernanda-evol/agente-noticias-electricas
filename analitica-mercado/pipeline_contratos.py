@@ -194,6 +194,7 @@ def build_database(empresas: list[dict], contratos: list[dict]) -> None:
             df_emp[col] = df_emp[col].apply(lambda v: ", ".join(v) if isinstance(v, list) else v)
 
     df_con = pd.DataFrame(contratos)
+    df_con.insert(0, "contrato_row_id", range(len(df_con)))
 
     con.register("df_emp", df_emp)
     con.register("df_con", df_con)
@@ -202,17 +203,48 @@ def build_database(empresas: list[dict], contratos: list[dict]) -> None:
 
     # Vista de análisis: cada fila de contrato con el nombre de la empresa
     # suministradora y del cliente resueltos (join por `numero`).
+    #
+    # `numero` en infotecnica/empresas NO es único entre categorías (giro=1
+    # "G...", generación; giro=4 "L...", industria/cliente libre; y otras),
+    # así que numero=10 puede calzar con más de una empresa. El
+    # suministrador siempre es generador (mnemotécnico "G..."), pero el
+    # cliente puede ser cualquier categoría -- el campo `tipo` del contrato
+    # (R: regulado, L: libre, C: entre generadores) da la pista de cuál
+    # prefijo priorizar; QUALIFY se queda con una sola fila por contrato
+    # aunque la pista no baste para desambiguar del todo (mejor una
+    # coincidencia posiblemente imperfecta que filas duplicadas).
     con.execute("""
         CREATE VIEW contratos_con_nombres AS
+        WITH cliente_candidato AS (
+            SELECT
+                c.contrato_row_id,
+                cli.nombre       AS cliente_nombre,
+                cli.mnemotecnico AS cliente_mnemotecnico_resuelto,
+                ROW_NUMBER() OVER (
+                    PARTITION BY c.contrato_row_id
+                    ORDER BY
+                        CASE
+                            WHEN c.tipo = 'C' AND cli.mnemotecnico LIKE 'G%' THEN 0
+                            WHEN c.tipo = 'L' AND cli.mnemotecnico LIKE 'L%' THEN 0
+                            WHEN c.tipo = 'R' AND cli.mnemotecnico NOT LIKE 'G%' THEN 0
+                            ELSE 1
+                        END,
+                        cli.id_infotecnica
+                ) AS rn
+            FROM contratos_suministro_raw c
+            LEFT JOIN empresas_infotecnica_raw cli ON cli.numero = c.cliente
+        )
         SELECT
             c.*,
             sup.nombre        AS suministrador_nombre,
             sup.mnemotecnico  AS suministrador_mnemotecnico_resuelto,
-            cli.nombre        AS cliente_nombre,
-            cli.mnemotecnico  AS cliente_mnemotecnico_resuelto
+            cc.cliente_nombre,
+            cc.cliente_mnemotecnico_resuelto
         FROM contratos_suministro_raw c
-        LEFT JOIN empresas_infotecnica_raw sup ON sup.numero = c.suministrador
-        LEFT JOIN empresas_infotecnica_raw cli ON cli.numero = c.cliente
+        LEFT JOIN empresas_infotecnica_raw sup
+            ON sup.numero = c.suministrador AND sup.mnemotecnico LIKE 'G%'
+        LEFT JOIN cliente_candidato cc
+            ON cc.contrato_row_id = c.contrato_row_id AND cc.rn = 1
     """)
 
     con.execute("""
@@ -242,7 +274,18 @@ def main():
     api_key = _get_api_key()
     print("Descargando infotecnica/empresas...")
     empresas = fetch_empresas(api_key)
-    numero_a_mnemotecnico = {e["numero"]: e["mnemotecnico"] for e in empresas if e.get("numero") is not None}
+    # OJO: `numero` NO es único en infotecnica/empresas -- se reutiliza entre
+    # categorías (giro=1 "G0010" generador, giro=4 "L0010" industria, etc.),
+    # así que numero=10 puede mapear tanto a "G0010" (AES Andes) como a
+    # "P0010" (otra entidad no relacionada) según qué registro gane el dict.
+    # Los suministradores de contratos_de_suministro_vigentes son siempre
+    # generadores (mnemotécnico "G..."), así que el mapeo se restringe a esos.
+    numero_a_mnemotecnico = {
+        e["numero"]: e["mnemotecnico"]
+        for e in empresas
+        if e.get("numero") is not None and str(e.get("mnemotecnico", "")).startswith("G")
+    }
+    print(f"  ({len(numero_a_mnemotecnico)} empresas con mnemotécnico 'G...' disponibles como suministradoras)")
     print("Descargando contratos_de_suministro_vigentes...")
     contratos = fetch_contratos(api_key, numero_a_mnemotecnico)
     print("Actualizando base DuckDB...")
