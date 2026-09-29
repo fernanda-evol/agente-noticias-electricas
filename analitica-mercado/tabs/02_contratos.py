@@ -75,7 +75,7 @@ def cargar_datos():
 def render():
     st.subheader("Contratos de suministro y evolución por empresa")
     st.caption(
-        "Fuente: /api/v2/recursos/contratos_de_suministro_vigentes (Coordinador, SIPUB) — "
+        "Fuente: Plataforma de Contratos del Coordinador (export manual, no API) — "
         "una fila por contrato **y año de vigencia**, cruzada con capacidad instalada."
     )
 

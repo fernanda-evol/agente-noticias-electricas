@@ -36,11 +36,14 @@ jobs:
           SIPUB_API_KEY: ${{ secrets.SIPUB_API_KEY }}
         run: python pipeline.py
 
-      - name: Ejecutar pipeline de contratos de suministro
-        working-directory: analitica-mercado
-        env:
-          SIPUB_API_KEY: ${{ secrets.SIPUB_API_KEY }}
-        run: python pipeline_contratos.py
+      # El pipeline de contratos vía API (pipeline_contratos.py) quedó
+      # DESACTIVADO desde 2026-09-29: la Plataforma de Contratos del
+      # Coordinador (sin API, solo descarga manual) resultó tener
+      # muchísima más cobertura (233 suministradoras y 2.950 clientes,
+      # vs 23 y 52 por la API) y trae RUT directo. Los contratos ahora
+      # se actualizan a mano con pipeline_contratos_manual.py cuando
+      # Fernanda sube un Contratos_publica.xlsx nuevo -- no se pierde
+      # nada por no correrlo aquí, porque no toca mercado.duckdb.
 
       - name: Guardar cambios en la base de datos
         if: always()

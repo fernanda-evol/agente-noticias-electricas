@@ -79,14 +79,24 @@ def _normalizar(texto: str) -> set:
     return tokens
 
 
+def _normalizar_rut(rut) -> str:
+    """91.081.000-6 -> 91081000-6 (sin puntos, sin espacios). Ambas fuentes
+    traen el RUT en formatos distintos (Balance con puntos, Contratos sin
+    puntos); normalizado así, comparten formato y es una llave mucho más
+    confiable que el nombre de la empresa."""
+    if not rut or str(rut).strip().lower() in ("nan", "none", ""):
+        return ""
+    return str(rut).strip().replace(".", "").replace(" ", "").upper()
+
+
 @st.cache_data(ttl=3600)
 def cargar_datos():
     con = duckdb.connect(DB_PATH, read_only=True)
     retiros = con.execute("SELECT * FROM retiros_balance").df()
     try:
         contratos = con.execute("""
-            SELECT suministrador_nombre, cliente_nombre, fecha_inicio, fecha_termino,
-                   energia_contratada, tipo
+            SELECT suministrador_nombre, rut_suministrador, cliente_nombre, fecha_inicio,
+                   fecha_termino, energia_contratada, tipo, estado_contrato
             FROM contratos_con_nombres
         """).df()
     except duckdb.CatalogException:
@@ -100,25 +110,37 @@ def cargar_datos():
 
 def _preparar_matching(contratos: pd.DataFrame):
     contratos = contratos.copy()
-    contratos["_tokens_suministrador"] = contratos["suministrador_nombre"].apply(_normalizar)
+    contratos["_rut_suministrador_norm"] = contratos["rut_suministrador"].apply(_normalizar_rut)
     contratos["_tokens_cliente"] = contratos["cliente_nombre"].apply(_normalizar)
     return contratos
 
 
-def _buscar_contrato(nombre_medidor: str, empresa_tokens: set, contratos_prep: pd.DataFrame):
-    """Busca, dentro de los contratos de la MISMA empresa suministradora
-    (por coincidencia de tokens del nombre), el cliente cuyo nombre
-    comparta más tokens con nombre_medidor. Devuelve None si no hay
-    ningún cliente con al menos 1 token en común."""
+def _buscar_contrato(nombre_medidor: str, empresa_tokens: set, contratos_prep: pd.DataFrame, rut_empresa: str = ""):
+    """Busca, dentro de los contratos de la MISMA empresa suministradora,
+    el cliente cuyo nombre comparta más tokens con nombre_medidor.
+
+    La empresa suministradora se identifica primero por RUT (llave
+    confiable, disponible desde que se reemplazó el pipeline de contratos
+    por el export de la Plataforma de Contratos); si no hay RUT en
+    Balance para ese punto, se cae a coincidencia de nombre como respaldo.
+    Devuelve None si no hay ningún cliente con al menos 1 token en común."""
     if contratos_prep.empty:
         return None
     tokens_medidor = _normalizar(nombre_medidor)
     if not tokens_medidor:
         return None
 
-    candidatos = contratos_prep[
-        contratos_prep["_tokens_suministrador"].apply(lambda t: len(t & empresa_tokens) > 0)
-    ]
+    rut_norm = _normalizar_rut(rut_empresa)
+    if rut_norm:
+        candidatos = contratos_prep[contratos_prep["_rut_suministrador_norm"] == rut_norm]
+    else:
+        candidatos = pd.DataFrame()
+
+    if candidatos.empty:
+        # Respaldo: sin RUT (o RUT sin match), se intenta por nombre.
+        candidatos = contratos_prep[
+            contratos_prep["suministrador_nombre"].apply(lambda n: len(_normalizar(n) & empresa_tokens) > 0)
+        ]
     if candidatos.empty:
         return None
 
@@ -219,22 +241,30 @@ def render():
     else:
         contratos_prep = _preparar_matching(contratos) if not contratos.empty else contratos
         empresa_tokens = _normalizar(empresa_sel)
+        rut_empresa = df_emp["rut"].dropna().iloc[0] if df_emp["rut"].notna().any() else ""
 
         estados, f_inicio, f_termino, tipo_contrato = [], [], [], []
         for _, fila in df_clientes.iterrows():
-            match = _buscar_contrato(fila["nombre_medidor"], empresa_tokens, contratos_prep) if not contratos_prep.empty else None
+            match = (
+                _buscar_contrato(fila["nombre_medidor"], empresa_tokens, contratos_prep, rut_empresa)
+                if not contratos_prep.empty else None
+            )
             if match is None:
                 estados.append("Sin contrato identificado")
                 f_inicio.append(None)
                 f_termino.append(None)
                 tipo_contrato.append(None)
             else:
-                termino = match["fecha_termino"]
-                try:
-                    vigente = termino is None or pd.isna(termino) or datetime.strptime(str(termino)[:10], "%Y-%m-%d").date() >= date.today()
-                except ValueError:
-                    vigente = True
-                estados.append("Contrato vigente (posible)" if vigente else "Contrato vencido (posible)")
+                estado_real = match.get("estado_contrato")
+                if estado_real in ("Vigente", "No vigente"):
+                    estados.append(f"{estado_real} (match posible)")
+                else:
+                    termino = match["fecha_termino"]
+                    try:
+                        vigente = termino is None or pd.isna(termino) or datetime.strptime(str(termino)[:10], "%Y-%m-%d").date() >= date.today()
+                    except ValueError:
+                        vigente = True
+                    estados.append("Contrato vigente (posible)" if vigente else "Contrato vencido (posible)")
                 f_inicio.append(match["fecha_inicio"])
                 f_termino.append(match["fecha_termino"])
                 tipo_contrato.append(match["tipo"])
