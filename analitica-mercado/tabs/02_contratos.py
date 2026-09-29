@@ -13,6 +13,13 @@ propietario, y contratos_con_nombres viene de infotecnica (v2) con su
 propio nombre — no comparten un ID común. Se normaliza a mayúsculas y
 sin espacios extra antes de cruzar; empresas que no calcen quedan sin
 capacidad asociada (se avisa en la UI en vez de fallar en silencio).
+
+PMGD se aproxima igual que en la pestaña de Capacidad Instalada: una
+empresa se considera "PMGD" si TODAS sus centrales operativas tienen
+9 MW o menos (umbral regulatorio). La mayoría de las PMGD venden a
+precio estabilizado y no aparecen con contratos bilaterales -- la
+sección de PMGD de esta pestaña puede salir corta, y eso es esperable,
+no un error.
 """
 
 import os
@@ -20,6 +27,7 @@ import os
 import duckdb
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px
 import streamlit as st
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "mercado.duckdb")
@@ -31,12 +39,13 @@ VERDE = "#43A047"
 ROJO = "#E53935"
 
 TIPO_LABELS = {"R": "Cliente regulado", "L": "Cliente libre", "C": "Entre generadores"}
+PMGD_MW_MAX = 9.0
 
 
 def _norm(nombre: str) -> str:
     if not nombre:
         return ""
-    return " ".join(nombre.strip().upper().split())
+    return " ".join(str(nombre).strip().upper().split())
 
 
 @st.cache_data(ttl=3600)
@@ -86,9 +95,11 @@ def render():
     if ultima is not None:
         st.caption(f"Datos actualizados desde SIPUB el {ultima}")
 
-    # Capacidad por empresa (nombre normalizado -> MW), toda y solo operativa
+    # Capacidad por empresa (nombre normalizado -> MW), toda y solo operativa,
+    # y si toda su capacidad operativa es PMGD (<= 9 MW por central).
     cap_por_empresa = pd.Series(dtype=float)
     cap_por_empresa_operativa = pd.Series(dtype=float)
+    es_pmgd_empresa = pd.Series(dtype=bool)
     nombre_original = {}
     if not capacidad.empty:
         cap = capacidad.copy()
@@ -96,6 +107,7 @@ def render():
         cap_por_empresa = cap.groupby("empresa_norm")["capacidad_mw_centrales"].sum()
         cap_op = cap[cap["estado"].str.contains("Operativ", case=False, na=False)]
         cap_por_empresa_operativa = cap_op.groupby("empresa_norm")["capacidad_mw_centrales"].sum()
+        es_pmgd_empresa = cap_op.groupby("empresa_norm")["capacidad_mw_centrales"].max() <= PMGD_MW_MAX
         # nombre "bonito" (tal como aparece en capacidad_central) por cada norm,
         # para mostrar en el selector el mismo texto que en la pestaña de Capacidad.
         nombre_original = cap.drop_duplicates("empresa_norm").set_index("empresa_norm")["propietario"].to_dict()
@@ -114,15 +126,42 @@ def render():
     empresa_sel = st.selectbox("Empresa generadora", empresas)
     empresa_sel_norm = _norm(empresa_sel)
     df_emp = contratos[contratos["suministrador_norm"] == empresa_sel_norm].copy()
-
     cap_mw = cap_por_empresa_operativa.get(empresa_sel_norm)
 
     if df_emp.empty:
         st.info(f"**{empresa_sel}** no tiene contratos de suministro vigentes registrados en SIPUB.")
         if pd.notna(cap_mw):
             st.metric("Capacidad operativa instalada", f"{cap_mw:,.0f} MW")
-        return
+    else:
+        _render_detalle_empresa(df_emp, empresa_sel, cap_mw)
 
+    st.divider()
+
+    # ---------- ranking global de suministradores ----------
+    st.markdown("#### Ranking de suministradores por energía contratada (último año disponible)")
+    anio_global = int(contratos["año"].max()) if contratos["año"].notna().any() else None
+    if anio_global:
+        rank = (
+            contratos[contratos["año"] == anio_global]
+            .groupby("suministrador_nombre")["energia_contratada"].sum()
+            .sort_values(ascending=False).head(15).reset_index()
+        )
+        fig3 = go.Figure(go.Bar(
+            x=rank["energia_contratada"], y=rank["suministrador_nombre"],
+            orientation="h", marker_color=CELESTE,
+        ))
+        fig3.update_layout(
+            height=420, margin=dict(l=10, r=10, t=10, b=10),
+            xaxis_title=f"Energía contratada {anio_global} (GWh/año)", yaxis=dict(autorange="reversed"),
+        )
+        st.plotly_chart(fig3, use_container_width=True)
+
+    st.divider()
+
+    _render_seccion_pmgd(contratos, es_pmgd_empresa)
+
+
+def _render_detalle_empresa(df_emp: pd.DataFrame, empresa_sel: str, cap_mw):
     # ---------- KPIs ----------
     anio_max = int(df_emp["año"].max()) if df_emp["año"].notna().any() else None
     df_anio_actual = df_emp[df_emp["año"] == anio_max] if anio_max else df_emp.iloc[0:0]
@@ -212,21 +251,53 @@ def render():
     else:
         st.info("No hay fechas de término registradas para esta empresa.")
 
-    # ---------- ranking de empresas ----------
-    st.markdown("#### Ranking de suministradores por energía contratada (último año disponible)")
-    anio_global = int(contratos["año"].max()) if contratos["año"].notna().any() else None
-    if anio_global:
-        rank = (
-            contratos[contratos["año"] == anio_global]
-            .groupby("suministrador_nombre")["energia_contratada"].sum()
-            .sort_values(ascending=False).head(15).reset_index()
+
+def _render_seccion_pmgd(contratos: pd.DataFrame, es_pmgd_empresa: pd.Series):
+    st.markdown("#### PMGD — contratos de suministradores clasificados como PMGD")
+    st.caption(
+        "Empresas cuyas centrales operativas tienen todas 9 MW o menos (umbral regulatorio). "
+        "La mayoría de las PMGD venden a precio estabilizado y no figuran con contratos "
+        "bilaterales, así que es normal que esta lista salga corta."
+    )
+    if es_pmgd_empresa.empty:
+        st.info("No hay datos de capacidad cargados para clasificar qué suministradores son PMGD.")
+        return
+
+    pmgd_norms = set(es_pmgd_empresa[es_pmgd_empresa].index)
+    df_pmgd = contratos[contratos["suministrador_norm"].isin(pmgd_norms)].copy()
+
+    if df_pmgd.empty:
+        st.info("Ningún suministrador clasificado como PMGD tiene contratos vigentes registrados en SIPUB.")
+        return
+
+    resumen = (
+        df_pmgd.groupby("suministrador_nombre")
+        .agg(
+            n_contratos=("cliente_nombre", "count"),
+            n_clientes=("cliente_nombre", "nunique"),
+            energia_gwh=("energia_contratada", "sum"),
         )
-        fig3 = go.Figure(go.Bar(
-            x=rank["energia_contratada"], y=rank["suministrador_nombre"],
-            orientation="h", marker_color=CELESTE,
-        ))
-        fig3.update_layout(
-            height=420, margin=dict(l=10, r=10, t=10, b=10),
-            xaxis_title=f"Energía contratada {anio_global} (GWh/año)", yaxis=dict(autorange="reversed"),
-        )
-        st.plotly_chart(fig3, use_container_width=True)
+        .sort_values("energia_gwh", ascending=False)
+        .reset_index()
+    )
+    q1, q2 = st.columns(2)
+    q1.metric("Suministradores PMGD con contratos", f"{resumen.shape[0]:,}")
+    q2.metric("Energía contratada total (todas las filas/años)", f"{resumen['energia_gwh'].sum():,.1f} GWh/año")
+
+    fig = px.bar(
+        resumen, x="energia_gwh", y="suministrador_nombre", orientation="h",
+        labels={"energia_gwh": "Energía contratada (GWh/año, todas las filas)", "suministrador_nombre": ""},
+        color_discrete_sequence=[VERDE],
+    )
+    fig.update_layout(yaxis={"categoryorder": "total ascending"}, height=max(240, 40 * len(resumen)))
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.dataframe(
+        resumen, use_container_width=True, hide_index=True,
+        column_config={
+            "suministrador_nombre": "Suministrador",
+            "n_contratos": "N° filas de contrato",
+            "n_clientes": "Clientes distintos",
+            "energia_gwh": st.column_config.NumberColumn("Energía (GWh/año)", format="%.1f"),
+        },
+    )
