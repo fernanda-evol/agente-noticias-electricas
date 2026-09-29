@@ -108,15 +108,26 @@ def fetch_centrales(api_key: str) -> list[dict]:
 
 
 def _to_float(value):
-    """Los números numéricos de /centrales vienen como texto con coma
-    decimal (ej. '2,96'), o string vacío cuando el registro está en
-    revisión. None si no se puede convertir."""
+    """Los campos numéricos de /centrales vienen inconsistentes: algunos
+    registros usan coma decimal ('2,96'), otros punto decimal ('88.6173'),
+    y hay strings vacíos cuando el registro está en revisión. Se detecta
+    el formato por la presencia de coma en vez de asumir uno fijo — tratar
+    todo como "coma decimal, punto de miles" corrompía los valores que ya
+    venían con punto decimal (ej. '88.6173' -> 886173.0, 10000x más grande).
+    None si no se puede convertir."""
     if value is None or value == "":
         return None
     if isinstance(value, (int, float)):
         return float(value)
+    s = str(value).strip()
+    if not s:
+        return None
+    if "," in s:
+        # Coma = separador decimal; cualquier punto presente es de miles.
+        s = s.replace(".", "").replace(",", ".")
+    # Si no hay coma, el punto (si existe) ya es el separador decimal: no tocar.
     try:
-        return float(str(value).replace(".", "").replace(",", "."))
+        return float(s)
     except ValueError:
         return None
 
