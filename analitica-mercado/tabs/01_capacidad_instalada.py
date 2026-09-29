@@ -87,30 +87,48 @@ def cargar_datos():
     return df, (ultima_corrida[0] if ultima_corrida else None)
 
 
-def _grafico_mix(df_in: pd.DataFrame, col_empresa: str, top_n: int, key_suffix: str):
-    empresas_top = (
+def _grafico_mix(df_in: pd.DataFrame, col_empresa: str, etiqueta: str, key_suffix: str):
+    opciones = (
         df_in.groupby(col_empresa)["capacidad_mw_centrales"].sum()
-        .sort_values(ascending=False).head(top_n).index
+        .sort_values(ascending=False).index.tolist()
     )
-    df_mix = df_in[df_in[col_empresa].isin(empresas_top)].copy()
-    if df_mix.empty:
+    if not opciones:
         st.info("No hay datos para armar el mix tecnológico con el filtro actual.")
         return
-    mix = df_mix.groupby([col_empresa, "tipo_tecnologia"], as_index=False)["capacidad_mw_centrales"].sum()
-    mix["pct"] = mix.groupby(col_empresa)["capacidad_mw_centrales"].transform(lambda s: 100 * s / s.sum())
-    orden = list(empresas_top)[::-1]
-    fig = px.bar(
-        mix, x="pct", y=col_empresa, color="tipo_tecnologia", orientation="h",
-        labels={"pct": "% de la capacidad", col_empresa: "", "tipo_tecnologia": "Tecnología"},
-        category_orders={col_empresa: orden},
-        custom_data=["tipo_tecnologia", "capacidad_mw_centrales"],
+
+    sel = st.selectbox(
+        f"Elegir {etiqueta}", opciones, key=f"mix_select_{key_suffix}"
     )
-    fig.update_traces(hovertemplate="%{customdata[0]}<br>%{x:.1f}% · %{customdata[1]:,.0f} MW<extra></extra>")
-    fig.update_layout(
-        barmode="stack", height=max(380, 28 * len(empresas_top)), xaxis_ticksuffix="%",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    df_sel = df_in[df_in[col_empresa] == sel]
+    mix = (
+        df_sel.groupby("tipo_tecnologia", as_index=False)["capacidad_mw_centrales"].sum()
+        .sort_values("capacidad_mw_centrales", ascending=False)
     )
-    st.plotly_chart(fig, use_container_width=True, key=f"mix_{key_suffix}")
+    mw_total_sel = mix["capacidad_mw_centrales"].sum()
+
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        fig = px.pie(
+            mix, names="tipo_tecnologia", values="capacidad_mw_centrales", hole=0.5,
+            color_discrete_sequence=px.colors.qualitative.Set2,
+        )
+        fig.update_traces(
+            textposition="inside", textinfo="percent+label",
+            hovertemplate="%{label}<br>%{value:,.0f} MW · %{percent}<extra></extra>",
+        )
+        fig.update_layout(height=380, showlegend=False, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, use_container_width=True, key=f"mix_pie_{key_suffix}")
+    with c2:
+        st.metric(f"Capacidad total — {sel}", f"{mw_total_sel:,.0f} MW")
+        st.dataframe(
+            mix.assign(pct=lambda d: 100 * d["capacidad_mw_centrales"] / mw_total_sel),
+            use_container_width=True, hide_index=True,
+            column_config={
+                "tipo_tecnologia": "Tecnología",
+                "capacidad_mw_centrales": st.column_config.NumberColumn("MW", format="%.1f"),
+                "pct": st.column_config.NumberColumn("%", format="%.1f%%"),
+            },
+        )
 
 
 def render():
@@ -205,6 +223,15 @@ def render():
         )
         col_empresa = "holding" if agrupar_holding else "propietario"
         etiqueta = "holding" if agrupar_holding else "empresa"
+        if agrupar_holding:
+            st.caption(
+                "⚠️ Este agrupamiento solo cubre entidades que el propio Coordinador ya "
+                "consolidó bajo un mismo grupo económico en su registro (ej. Colbún + Río "
+                "Tranquilo). No detecta sponsors o fondos que financian varios proyectos como "
+                "SPAs legalmente separadas sin fusionarlas ahí -- ejemplo real: **AR CERRO "
+                "TIGRE SPA** y **AR LLANOS DEL VIENTO SPA** parecen del mismo dueño por el "
+                "nombre, pero SIPUB las tiene en grupos distintos y acá quedan sin agrupar."
+            )
     else:
         col_empresa = "propietario"
         etiqueta = "empresa"
@@ -227,11 +254,8 @@ def render():
     st.divider()
 
     st.subheader(f"Mix tecnológico por {etiqueta}")
-    st.caption(f"% de la capacidad de cada {etiqueta} que corresponde a cada tecnología (dentro del filtro actual).")
-    top_n_mix = st.slider(
-        f"{etiqueta.capitalize()}s a mostrar (ordenados por capacidad total)", 5, 40, 15, key="mix_top_n"
-    )
-    _grafico_mix(df_f, col_empresa, top_n_mix, key_suffix="empresa")
+    st.caption(f"Elige un/a {etiqueta} para ver en qué tecnologías tiene repartida su capacidad (dentro del filtro actual).")
+    _grafico_mix(df_f, col_empresa, etiqueta, key_suffix="empresa")
 
     st.divider()
 
