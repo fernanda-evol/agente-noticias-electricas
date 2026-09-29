@@ -34,6 +34,7 @@ pipeline.py, o a mano con: python pipeline_contratos.py
 import os
 import sys
 import time
+import traceback
 from datetime import datetime, timezone
 
 import duckdb
@@ -213,4 +214,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # Se deja constancia del traceback en un archivo (además de stderr)
+        # porque los logs de este workflow no son fáciles de inspeccionar
+        # fuera de GitHub; el workflow lo comitea al repo si el paso falla.
+        error_path = os.path.join(os.path.dirname(__file__), "pipeline_contratos_error.log")
+        with open(error_path, "w") as f:
+            f.write(f"Corrida fallida: {datetime.now(timezone.utc).isoformat()}\n\n")
+            f.write(traceback.format_exc())
+        traceback.print_exc()
+        sys.exit(1)
