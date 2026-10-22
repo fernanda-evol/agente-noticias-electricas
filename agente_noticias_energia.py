@@ -24,14 +24,17 @@ HEADERS = {
 }
 
 # --- Configuración de Gemini ---
-# gemini-2.5-flash-lite: es el modelo con cuota gratuita más generosa (del
-# orden de 1.000-1.500 solicitudes/día) y de sobra para clasificar/resumir
+# gemini-3.5-flash-lite: modelo liviano con cuota gratuita generosa (del
+# orden de 1.500 solicitudes/día). Reemplaza a gemini-2.5-flash-lite, que
+# Google retiró (devuelve 404 NOT_FOUND). Si Google vuelve a retirar el
+# modelo, el agente lo detecta, avisa claro en el log y sigue con reglas
+# locales; se puede cambiar el modelo con la variable GEMINI_MODEL. y de sobra para clasificar/resumir
 # noticias cortas. Con el volumen diario de este agente (decenas de
 # noticias) el riesgo real de tope de cuota es bajo, pero igual se deja un
 # límite de llamadas por corrida y una caída a reglas locales por si acaso
 # (falla de red, cuota agotada, respuesta inválida).
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 MAX_GEMINI_LLAMADAS_POR_CORRIDA = int(os.getenv("MAX_GEMINI_CALLS_PER_RUN", "60"))
 GEMINI_ESPERA_SEGUNDOS = float(os.getenv("GEMINI_SLEEP_SECONDS", "3"))
 
@@ -227,6 +230,12 @@ class CuotaGeminiAgotada(Exception):
     pass
 
 
+class GeminiNoDisponible(CuotaGeminiAgotada):
+    """El modelo configurado no existe o fue retirado (404 NOT_FOUND), o la
+    API key es inválida (401/403). Insistir noticia por noticia no sirve."""
+    pass
+
+
 def _contiene_palabra(contenido, palabra):
     """Coincidencia por palabra completa (no substring): evita falsos
     positivos como que la sigla "SEA" se dé por encontrada dentro de la
@@ -330,6 +339,14 @@ def clasificar_con_gemini(client, titulo, texto, contador_llamadas):
                     raise CuotaGeminiAgotada("Gemini devolvió 429 de forma persistente")
                 time.sleep((2 ** intento) + random.uniform(0, 1))
                 continue
+            if "404" in mensaje or "NOT_FOUND" in mensaje.upper():
+                raise GeminiNoDisponible(
+                    f"ATENCIÓN: el modelo de Gemini '{GEMINI_MODEL}' no está disponible (404). "
+                    "Hay que cambiar GEMINI_MODEL por un modelo vigente. Detalle: " + mensaje[:200])
+            if any(c in mensaje for c in ("401", "403", "API_KEY_INVALID", "PERMISSION_DENIED")):
+                raise GeminiNoDisponible(
+                    "ATENCIÓN: Gemini rechazó la API key (401/403). Revisa el secret GEMINI_API_KEY. "
+                    "Detalle: " + mensaje[:200])
             print(f"Gemini: error de API ({e}), se usan reglas locales para esta noticia")
             return None
 
@@ -602,6 +619,8 @@ def ejecutar_agente():
                     time.sleep(GEMINI_ESPERA_SEGUNDOS)
             except CuotaGeminiAgotada as e:
                 print(f"{e} — de acá en adelante se usan reglas locales para esta corrida.")
+                if isinstance(e, GeminiNoDisponible):
+                    print("!!! Las noticias de esta corrida quedarán con resúmenes de reglas locales, no de Gemini.")
                 cuota_agotada = True
 
         if analisis is None:
